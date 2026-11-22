@@ -228,6 +228,26 @@ def published(ev):
 
 
 # ===================================================================== layer 2
+BODY_COMPS = ("BZ", "BT")      # P on the vertical, SH on the transverse (body-wave windows)
+BODY_LAG = 6.0                 # max per-station lag for body waves, s
+BODY_DMIN, BODY_DMAX = 30.0, 90.0   # body waves: avoid upper-mantle triplications and the core shadow
+COMP_TITLES = {"Z": "Z", "R": "R", "T": "T", "BZ": "P (Z)", "BT": "SH (T)"}
+
+
+def body_band_for(mag):
+    """Period band (s) for the body-wave windows; depth phases pP/sP live here (issue #1)."""
+    return (12.0, 40.0) if mag < 6.0 else (15.0, 50.0)
+
+
+def expand(raw, dist, band, bband, use_body):
+    """Raw Z/R/T grids -> filtered traces per inversion component."""
+    out = {c: filt(raw[c], band) for c in "ZRT"}
+    if use_body and BODY_DMIN <= dist <= BODY_DMAX:
+        out["BZ"] = filt(raw["Z"], bband)
+        out["BT"] = filt(raw["T"], bband)
+    return out
+
+
 def band_for(mag):
     """Period band (s) for long-period full-waveform inversion."""
     # Tested on M6.8 Banda Sea (2026-11-21): 50-100 s gave VR 65 % and a mechanism 8-9 deg
@@ -340,8 +360,8 @@ def download_data(ev, stations, t_end, band, n):
             sub.remove_response(inventory=inv, output="DISP", pre_filt=(0.002, 0.004, 0.1, 0.2))
             sub.rotate("->ZNE", inventory=inv)
             sub.rotate("NE->RT", back_azimuth=s["baz"])
-            data[f"{s['net']}.{s['sta']}"] = {c: filt(to_grid(sub.select(component=c)[0], t0, n), band)
-                                               for c in "ZRT"}
+            data[f"{s['net']}.{s['sta']}"] = {c: to_grid(sub.select(component=c)[0], t0, n)
+                                               for c in "ZRT"}        # raw; filtered per band later
         except Exception as e:
             detail(f"    skip {s['net']}.{s['sta']}.{loc or '--'}: {str(e)[:70] or e.__class__.__name__}")
     return data
@@ -395,25 +415,53 @@ def greens(ev, stations, depth_km, t_end, band, n):
         for tr in st:
             key = f"{tr.stats.network}.{tr.stats.station}"
             g.setdefault(key, {}).setdefault(tr.stats.channel[-1], [None] * 6)[i] = \
-                filt(to_grid(tr, ev["time"], n), band)
+                to_grid(tr, ev["time"], n)                        # raw; filtered per band later
+    return g
+
+
+def expand_greens(graw, stations, band, bband, use_body):
+    dist = {f"{s['net']}.{s['sta']}": s["dist"] for s in stations}
+    g = {}
+    for key, comps in graw.items():
+        if not all(all(x is not None for x in comps.get(c, [None])) for c in "ZRT"):
+            continue
+        g[key] = {c: [filt(x, band) for x in comps[c]] for c in "ZRT"}
+        if use_body and BODY_DMIN <= dist.get(key, 0) <= BODY_DMAX:
+            g[key]["BZ"] = [filt(x, bband) for x in comps["Z"]]
+            g[key]["BT"] = [filt(x, bband) for x in comps["T"]]
     return g
 
 
 def windows(ev, stations, n):
+    """(i0, i1, noise-start) per (station, component). Surface components: P-60 s to past
+    the Rayleigh wave. Body windows: P (Z) and S (T), long enough for pP/sP depth phases."""
     from obspy.taup import TauPyModel
     model = TauPyModel("iasp91")
     w = {}
+    dep = max(ev["depth"], 0)
+    blen = 60 + 0.5 * dep                                   # covers sP-P delay for deep quakes
     for s in stations:
-        arr = model.get_travel_times(max(ev["depth"], 0), s["dist"], ["P", "Pdiff", "p"])
+        key = f"{s['net']}.{s['sta']}"
+        arr = model.get_travel_times(dep, s["dist"], ["P", "Pdiff", "p"])
         tp = min(a.time for a in arr) if arr else s["dist"] * 111.19 / 8
         t1 = s["dist"] * 111.19 / 3.4 + 250            # past the fundamental Rayleigh wave
-        i0, i1 = int((tp - 60 + PAD) / DT), min(n - 1, int((t1 + PAD) / DT))
-        w[f"{s['net']}.{s['sta']}"] = (i0, i1, int((tp - 60 - 400 + PAD) / DT))
+        sw = (int((tp - 60 + PAD) / DT), min(n - 1, int((t1 + PAD) / DT)), int((tp - 60 - 400 + PAD) / DT))
+        for c in "ZRT":
+            w[(key, c)] = sw
+        arr_s = model.get_travel_times(dep, s["dist"], ["S", "s"])
+        ts = min(a.time for a in arr_s) if arr_s else None
+        w[(key, "BZ")] = (int((tp - 15 + PAD) / DT), min(n - 1, int((tp + blen + PAD) / DT)),
+                          int((tp - 15 - 200 + PAD) / DT))
+        if ts:
+            # SH noise window: just before S (the P coda is the realistic background there)
+            w[(key, "BT")] = (int((ts - 15 + PAD) / DT), min(n - 1, int((ts + blen + PAD) / DT)),
+                              int((ts - 15 - 120 + PAD) / DT))
     return w
 
 
 def lag_group(c):
-    return "T" if c == "T" else "ZR"        # Rayleigh (Z, R) and Love (T) get separate lags
+    # Rayleigh (Z, R), Love (T), P and SH each get their own lag per station
+    return {"T": "T", "BZ": "P", "BT": "SH"}.get(c, "ZR")
 
 
 def build_system(keys, data, g, win, shift_s, lags=None):
@@ -423,7 +471,7 @@ def build_system(keys, data, g, win, shift_s, lags=None):
     rows_d, rows_G, idx = [], [], []
     for key, c in keys:
         k = int(round((shift_s + (lags or {}).get((key, lag_group(c)), 0.0)) / DT))
-        i0, i1, _ = win[key]
+        i0, i1, _ = win[(key, c)]
         d = data[key][c][i0:i1]
         G6 = np.array([gi[i0 - k:i1 - k] for gi in g[key][c]]).T / UNIT
         G5 = np.column_stack([G6[:, 0] - G6[:, 2], G6[:, 1] - G6[:, 2], G6[:, 3], G6[:, 4], G6[:, 5]])
@@ -449,14 +497,14 @@ def best_lags(keys, data, g, win, sol, maxlag):
     for key, c in keys:
         groups.setdefault((key, lag_group(c)), []).append(c)
     out = {}
-    nl = int(maxlag / DT)
     for (key, grp), comps in groups.items():
-        i0, i1, _ = win[key]
+        nl = int((BODY_LAG if grp in ("P", "SH") else maxlag) / DT)
         k0 = int(round(sol["shift"] / DT))
         best, bl = -np.inf, 0
         for L in range(-nl, nl + 1):
             num = den_s = 0.0
             for c in comps:
+                i0, i1, _ = win[(key, c)]
                 d = data[key][c][i0:i1]
                 syn = sum(m[j] * g[key][c][j][i0 - k0 - L:i1 - k0 - L] for j in range(6)) / UNIT
                 num += d @ syn
@@ -498,8 +546,12 @@ def trace_vr(sol):
 
 def invert(ev, args, outdir):
     band = tuple(float(x) for x in args.band.split(",")) if args.band else band_for(ev["mag"])
+    bband = body_band_for(ev["mag"])
+    use_body = not args.no_body
     say("\n▶ Own inversion (about 1-3 min)")
-    detail(f"  waveform inversion: periods {band[0]:.0f}-{band[1]:.0f} s, model {MODEL}")
+    detail(f"  waveform inversion: full waveforms {band[0]:.0f}-{band[1]:.0f} s"
+           + (f" + body waves (P on Z, SH on T) {bband[0]:.0f}-{bband[1]:.0f} s at "
+              f"{BODY_DMIN:.0f}-{BODY_DMAX:.0f}°" if use_body else "") + f", model {MODEL}")
     t_start = time.time()
     dmin = args.dmin if args.dmin is not None else 25.0
     dmax = args.dmax if args.dmax is not None else 90.0
@@ -528,13 +580,17 @@ def invert(ev, args, outdir):
     if len(stations) < 6:
         raise RuntimeError("too few usable records")
     win = windows(ev, stations, n)
+    data = {s_key: expand(raw, next(s["dist"] for s in stations if f"{s['net']}.{s['sta']}" == s_key),
+                          band, bband, use_body) for s_key, raw in data.items()}
 
-    # signal-to-noise check on the long-period band
+    # signal-to-noise check per component and band
     keys = []
     for s in stations:
         key = f"{s['net']}.{s['sta']}"
-        i0, i1, n0 = win[key]
-        for c in "ZRT":
+        for c in data[key]:
+            if (key, c) not in win:
+                continue
+            i0, i1, n0 = win[(key, c)]
             x = data[key][c]
             noise = np.sqrt(np.mean(x[max(0, n0):i0] ** 2)) if i0 - max(0, n0) > 20 else 0
             sig = np.sqrt(np.mean(x[i0:i1] ** 2))
@@ -542,7 +598,8 @@ def invert(ev, args, outdir):
                 keys.append((key, c))
 
     nsta_clear = len({k for k, _ in keys})
-    detail(f"  traces with clear signal (SNR > 3): {len(keys)} from {nsta_clear} stations")
+    nbody = sum(1 for _, c in keys if c in BODY_COMPS)
+    detail(f"  traces with clear signal (SNR > 3): {len(keys)} ({nbody} body-wave) from {nsta_clear} stations")
     if len(keys) < 8 or nsta_clear < 4:
         why = (f" A bigger quake (M{bigger[0][1]:.1f} {bigger[0][2]}) happened {bigger[0][0]:.0f} min "
                "before; its surface waves are probably masking this one." if bigger else
@@ -564,7 +621,7 @@ def invert(ev, args, outdir):
         dep = queue.pop(0)
         progress(f"Green's functions + inversion at {dep:.0f} km depth "
                  f"({len(results) + 1}/{len(results) + len(queue) + 1})…")
-        gcache[dep] = greens(ev, stations, dep, t_end, band, n)
+        gcache[dep] = expand_greens(greens(ev, stations, dep, t_end, band, n), stations, band, bband, use_body)
         use = [k for k in keys if k[0] in gcache[dep] and k[1] in gcache[dep][k[0]]
                and all(x is not None for x in gcache[dep][k[0]][k[1]])]
         # station lags are fitted once at the catalogue depth and then kept fixed, so
@@ -616,12 +673,12 @@ def invert(ev, args, outdir):
                            f"catalogue M{ev['mag']:.1f}); data do not constrain the mechanism")
     near = [r["depth"] for r in results if r["vr"] >= best["vr"] - 2.0]   # depths fitting ~as well
     props = mt_props(best["m"])
-    props.update(agency="SEISBOX inversion", depth=best["depth"], vr=best["vr"],
+    props.update(agency="SEISBOX inversion", depth=best["depth"], vr=best["vr"], body=use_body,
                  shift=best["shift"], depth_range=(min(near), max(near)), ntraces=len(best["keys"]), nsta=len({k for k, _ in best["keys"]}),
                  gap=gap, band=band, model=MODEL, runtime=time.time() - t_start,
                  depth_curve=[(r["depth"], r["vr"]) for r in results])
     progress("")
-    plot_fits(ev, best, stations, win, outdir, band)
+    plot_fits(ev, best, stations, win, outdir, band, bband if use_body else None)
     return props
 
 
@@ -702,21 +759,23 @@ def beach_figure(sols, title, path, terminal):
     plt.close(fig)
 
 
-def plot_fits(ev, best, stations, win, outdir, band):
+def plot_fits(ev, best, stations, win, outdir, band, bband=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     tv = trace_vr(best)
     info = {f"{s['net']}.{s['sta']}": s for s in stations}
     keys = sorted({k for k, _ in best["keys"]}, key=lambda k: info[k]["az"])[:16]
-    fig, axes = plt.subplots(len(keys), 3, figsize=(10, 1.0 * len(keys) + 1), squeeze=False)
+    comps = ["Z", "R", "T"] + (list(BODY_COMPS) if bband else [])
+    fig, axes = plt.subplots(len(keys), len(comps), figsize=(3.3 * len(comps), 1.0 * len(keys) + 1),
+                             squeeze=False)
     pos = {}
     p = 0
     for key, c, _, n in best["idx"]:
         pos[(key, c)] = (p, n)
         p += n
     for r, key in enumerate(keys):
-        for j, c in enumerate("ZRT"):
+        for j, c in enumerate(comps):
             ax = axes[r][j]
             ax.axis("off")
             if (key, c) in pos:
@@ -731,8 +790,9 @@ def plot_fits(ev, best, stations, win, outdir, band):
                 ax.text(-0.02, 0.5, f"{key}\n{s['dist']:.0f}° az{s['az']:.0f}°", transform=ax.transAxes,
                         ha="right", va="center", fontsize=7)
             if r == 0:
-                ax.set_title(c, fontsize=9)
-    fig.suptitle(f"Waveform fit: data (black) vs synthetic (red), {band[0]:.0f}-{band[1]:.0f} s, "
+                ax.set_title(COMP_TITLES[c], fontsize=9)
+    fig.suptitle(f"Waveform fit: data (black) vs synthetic (red), {band[0]:.0f}-{band[1]:.0f} s"
+                 + (f" + body waves {bband[0]:.0f}-{bband[1]:.0f} s" if bband else "") + ", "
                  f"depth {best['depth']:.0f} km, VR {best['vr']:.0f} %", fontsize=10)
     fig.savefig(os.path.join(outdir, "inversion_waveform_fits.png"), dpi=100, bbox_inches="tight")
     plt.close(fig)
@@ -802,6 +862,8 @@ def main():
     p.add_argument("--dmax", type=float, default=None, help="max distance, deg (default 90)")
     p.add_argument("--depths", default="", help="comma list of trial depths, km")
     p.add_argument("--band", default="", help="period band 'Tmin,Tmax' in s (default by magnitude)")
+    p.add_argument("--no-body", action="store_true",
+                   help="full long-period waveforms only (no P/SH body-wave windows)")
     p.add_argument("--maxlag", type=float, default=None,
                    help="max per-station time lag, s (default 30 for M6+, 0.6 x shortest period below)")
     p.add_argument("--name", default="", help="folder name under $SEISBOX_PROJECTS/mt "

@@ -418,13 +418,17 @@ GFZ GEOFON moment tensor. They usually appear 20–60 min after an M5+ quake.
    responses from all FDSN data centres through the IRIS federator. Any sensor location code with
    all three components is used. Of the usable stations, up to 30 with the best azimuth spread are kept.
 2. Removes the response and rotates to Z/R/T displacement, filtered at 50–100 s (35–80 s below M6).
+   It also cuts **body-wave windows** (P on Z, SH on T) at 15–50 s (12–40 s below M6) for
+   stations 30–90° away. Each window is long enough to include the depth phases pP/sP, whose
+   delay after P/S fixes the depth.
 3. Gets Green's functions from **IRIS Syngine** (AxiSEM, anisotropic PREM): six unit moment tensors
    for all stations at each trial depth. The heavy computation happens on IRIS's servers.
 4. Solves a **deviatoric moment tensor** by linear least squares on full waveforms (body and
    surface waves). It grid-searches centroid depth (extending the search if the best depth is at the
    edge) and centroid time shift. Each station gets a small time lag (±30 s, separately for
-   Rayleigh Z/R and Love T) to absorb 3-D Earth travel-time errors, as in the CAP method. The lags
-   are fitted once at the catalogue depth and then kept fixed during the depth search.
+   Rayleigh Z/R and Love T; ±6 s for P and SH) to absorb 3-D Earth travel-time errors, as in the
+   CAP method. The lags are fitted once at the catalogue depth and then kept fixed during the depth
+   search. `--no-body` uses the long-period waveforms only.
 5. Drops traces it cannot fit and re-solves. M0 is then taken from the median amplitude ratio of
    the well-fitting traces, which is less biased low than the least-squares fit over all traces.
    It reports Mw, M0, both nodal planes, P/T/B axes, fault type, double-couple / CLVD %, centroid
@@ -438,15 +442,16 @@ Validation on recent quakes:
 
 | Quake | Stations | SEISBOX result | Published | Difference |
 |---|---|---|---|---|
-| M6.8 Banda Sea, 21 Nov 2026, 116 km | 30 of 37 usable, gap 34° | Mw 6.79, thrust 129°/25°/97°, 136 km (116–156), VR 59 % | USGS Mww 6.81, 128°/25°/98° (other plane 299°/65°/86°), 100 km · Mwb 129 km · GFZ 6.79, 129 km | Kagan **2–6°**, ΔMw −0.05 to +0.02 |
-| M6.7 Peru, 21 Nov 2026, 108 km | 29 of 38 usable, gap 47° | Mw 6.63, strike-slip 20°/69°/−3°, 128 km (108–148), VR 50 % | USGS Mww 6.73, 21°/82°/−4°, 130 km · GFZ 6.68, 115 km | Kagan **7–14°**, ΔMw −0.05 to −0.11 |
+| M6.8 Banda Sea, 21 Nov 2026, 116 km | 30 stations (139 traces, 55 body-wave), gap 34° | Mw 6.74, thrust, **116 km**, VR 55 % | USGS Mww 6.81, 128°/25°/98° (other plane 299°/65°/86°), 100 km · Mwc 103 km · Mwb 129 km · GFZ 6.79, 129 km | Kagan **1–3°**, ΔMw −0.02 to −0.09 |
+| M6.7 Peru, 21 Nov 2026, 108 km | 29 stations (139 traces, 57 body-wave), gap 47° | Mw 6.63, strike-slip, **108 km** (108–128), VR 46 % | USGS Mww 6.73, 21°/82°/−4°, 130 km · Mwb 126 km · GFZ 6.68, 115 km | Kagan **6–11°**, ΔMw −0.05 to −0.10 |
 | M5.4–5.9: Yanglong China, Peru, Guatemala, Japan, Colombia | 8–37 usable | **refused** (VR 7–32 %) | USGS/GFZ Mw 5.4–5.9 | Not reliable in this period band. One trial setup printed a "poor" Colombia result that was 61–81° wrong, hence the 35 % cut-off. Yanglong and Japan were also masked by bigger quakes 63 and 78 min earlier, and the tool says so. |
 
 **Limits.**
 - In practice needs about **M6+**. Tests on five M5.4–5.9 quakes all ended in a refusal; smaller
   quakes need body waves or local data and models (open issue #3).
-- **Depth is the least certain number** (often ±20 km, and so far biased deep for these
-  intermediate-depth quakes). Use the reported range (open issue #1).
+- **Depth** comes mainly from the body-wave depth phases. Without body waves (`--no-body`) the
+  long-period fit hardly resolves depth: Banda Sea gave 136 km with a flat misfit curve, and
+  116 km with body waves. Still check the reported depth range.
 - The two nodal planes fit equally well, so the waveforms **cannot tell which one is the real
   fault**. Aftershocks, surface rupture or known faults decide that.
 - Rupture length, area and slip are not measured by this method.
