@@ -348,30 +348,31 @@ Events --live                  # start in live mode (30 s); Events --live 15 for
 | Key | Action |
 |---|---|
 | ↑ ↓ PgUp PgDn | move |
+| `i` (or `F`) | focal mechanism **+ own waveform inversion** (see `quakemt` below) |
 | Enter | details: time, location, depth, agencies, web link, and a ready ObsPy snippet to fetch waveforms |
 | `o` | open the quake's page in the browser |
 | `s` | source: All → USGS → EMSC → GFZ |
 | `m` | minimum magnitude |
-| `c` or `/` | country/region filter. Text is matched against the region name; commas mean OR (`japan,chile`). `usa` also matches US states and `, CA` |
+| `c` or `/` | country/region filter; commas mean OR (`japan,chile`). Country names and ISO codes (`iran`, `IRN`, `usa`, `uk`, `türkiye`) use **real country borders** (Natural Earth 1:50m, incl. islands and overseas territories): the epicentre must be inside the country, or offshore within 200 km of its coast. Any other text (`banda sea`, `aleutian`) is matched against the region name |
 | `d` | time window: 1 → 3 → 7 → 30 days |
 | `r` | reload now (it also refreshes itself every 5 minutes) |
 | `f` | **focal mechanism**: published USGS/GFZ moment tensors of the selected quake (see below) |
-| `F` (Shift+f) | focal mechanism **+ own waveform inversion** (M5.5+, about 1–3 min) |
 | `l` | **live mode** on/off: reloads every 30 s with a countdown in the header. Quakes that arrive while you watch get a green `●` for 10 minutes, and the phone beeps |
 | `?` / `q` | help / quit |
 
 <p align="center"><img src="docs/media/events-details.png" width="440" alt="Events details popup with ObsPy waveform snippet"></p>
 
-Magnitudes are coloured: yellow ≥ 4, red ≥ 5, inverted red ≥ 6. Each service returns at most
-1000 events. With a low magnitude and a long window, the bottom bar warns that older events are
-cut off. Raise the magnitude or shorten the window.
+Magnitudes are coloured: yellow ≥ 4, red ≥ 5, inverted red ≥ 6. A service returns at most 1000
+events per request, so `Events` pages back in time until the whole window is covered (up to 10
+requests per service; for example M1+ over 7 days is about 3400 events). Only if that is still not
+enough does the bottom bar warn that older events are cut off.
 
 USGS and EMSC usually answer in under a second, while GFZ can take 5–10 s. The list fills in as each
 service answers, and a service that fails keeps its previous results on screen.
 
 ### `quakemt`: focal mechanisms and moment tensors
 
-Select a quake in `Events` and press **`f`** (published) or **`F`**, i.e. Shift+f (own inversion),
+Select a quake in `Events` and press **`f`** (published) or **`i`** (own inversion; `F` also works),
 or run `quakemt` directly (`quakemt --help`).
 
 The terminal shows only the **source parameters and mechanism**: Mw, M0, depth, both nodal planes,
@@ -394,7 +395,7 @@ mt/
     └── inversion.json
 ```
 
-`f` and `F` write different files, so running both keeps both. On the command line, `--name` sets the
+`f` and `i` write different files, so running both keeps both. On the command line, `--name` sets the
 folder name.
 
 **Viewing images.** Images are never drawn in the terminal. After a run, press `o` (mechanism) or
@@ -410,7 +411,7 @@ seisview /sdcard/termux/projects/mt/2026-11-21_0942UTC_M6.8_Banda-Sea/*.png   # 
 the event (W-phase *Mww*, centroid *Mwc*, body-wave *Mwb*, regional *Mwr*, first-motion), plus the
 GFZ GEOFON moment tensor. They usually appear 20–60 min after an M5+ quake.
 
-**Layer 2 (`F`, about 1–3 min): own inversion from raw waveforms.**
+**Layer 2 (`i`, about 1–3 min): own inversion from raw waveforms.**
 
 1. Picks about 24–33 global broadband stations (IU, II, G, GE, IC, CU, GT, MN) 25–90° away (12–60° below M6), spread
    evenly in azimuth, and downloads 3-component long-period (LH, 1 sample/s) data and instrument

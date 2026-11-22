@@ -62,6 +62,7 @@ grep -qs 'seisbox.bashrc' "$HOME/.bashrc" || \
 [ -f "$HOME/.gnuplot" ] || cp "$R/termux/gnuplot" "$HOME/.gnuplot"
 install -m 755 "$R/termux/bin/seislive" "$PREFIX/bin/seislive"
 install -m 755 "$R/termux/bin/Events" "$PREFIX/bin/Events"; ln -sf Events "$PREFIX/bin/events"
+mkdir -p "$PREFIX/share/seisbox" && cp "$R/termux/share/countries.json" "$PREFIX/share/seisbox/"
 install -m 755 "$R/termux/bin/quakemt" "$PREFIX/bin/quakemt"
 install -m 755 "$R/termux/bin/seisview" "$PREFIX/bin/seisview"
 install -m 755 "$R/ubuntu/imgview.py" "$FILES/usr/var/lib/proot-distro/containers/ubuntu/rootfs/root/geo/bin/imgview"

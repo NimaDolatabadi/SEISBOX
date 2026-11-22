@@ -51,6 +51,7 @@ proot-distro login "$DISTRO" --bind "$REPO:/opt/seisbox" \
 say "6/6  Termux shortcuts, welcome screen, example projects"
 install -m 755 "$REPO/termux/bin/seislive" "$PREFIX/bin/seislive"
 install -m 755 "$REPO/termux/bin/Events" "$PREFIX/bin/Events"
+mkdir -p "$PREFIX/share/seisbox" && cp "$REPO/termux/share/countries.json" "$PREFIX/share/seisbox/"
 install -m 755 "$REPO/termux/bin/quakemt" "$PREFIX/bin/quakemt"
 install -m 755 "$REPO/termux/bin/seisview" "$PREFIX/bin/seisview"
 ln -sf Events "$PREFIX/bin/events"

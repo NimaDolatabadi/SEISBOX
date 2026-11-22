@@ -16,11 +16,12 @@ Usage:
 Keys (TUI):
   Up/Down PgUp/PgDn Home/End  move        Enter  details of selected quake
   s  source (All/USGS/EMSC/GFZ)           m  minimum magnitude
-  c  country/region text filter           d  time window (1/3/7/30 days)
+  c  country/region filter (country names/ISO codes use real borders + 200 km offshore;
+     other text matches region names)   d  time window (1/3/7/30 days)
   r  refresh now                          o  open selected quake's web page
   l  live mode on/off (refresh every 30 s, new quakes marked ● + beep)
   f  focal mechanism: published USGS/GFZ moment tensors of the selected quake
-  F  focal mechanism + own waveform inversion (needs geo, ~2-5 min, M5.5+)
+  i  focal mechanism + own waveform inversion (also F; needs geo, ~1-3 min, M5.5+)
   ?  help                                 q  quit
 Auto-refreshes every 5 minutes; in live mode every 30 s (Events --live 15 for 15 s).
 
@@ -49,6 +50,7 @@ SOURCES = {
 SOURCE_CYCLE = ["All", "USGS", "EMSC", "GFZ"]
 DAYS_CYCLE = [1, 3, 7, 30]
 REFRESH_SEC = 300
+INVERT_KEYS = (ord("i"), ord("I"), ord("F"))   # own inversion; plain i avoids Shift on phones
 LIVE_SEC = 30          # default live-mode interval
 NEW_SEC = 600          # how long a newly arrived quake stays marked ●
 HELP = """EVENTS — keys
@@ -58,12 +60,13 @@ o       open quake web page in browser
 s       source: All → USGS → EMSC → GFZ
 m       minimum magnitude
 c or /  country/region filter
-          iran   japan,chile   usa
-          (empty = everything)
+          iran   japan,chile   usa   IRN
+          countries: real borders + 200 km
+          offshore; other text: region name
 d       days: 1 → 3 → 7 → 30
 r       reload now (auto every 5 min)
 f       focal mechanism (USGS/GFZ published)
-F       + own moment-tensor inversion (M5.5+)
+i (or F) + own moment-tensor inversion (M5.5+)
 l       LIVE mode on/off: reload every 30 s,
           new quakes get a green ● and a beep
 q       quit
@@ -71,7 +74,8 @@ q       quit
 Mag colours: yellow ≥4  red ≥5  inverted ≥6
 Src: USGS+EMSC = same quake from both
 Command line: Events --help""".splitlines()
-LIMIT = 1000
+LIMIT = 1000           # events per request (server maximum is often 1000-20000)
+MAX_PAGES = 10         # up to 10 requests per source and reload
 
 # extra words matched for some country names (USGS writes "…, CA" / "…, Alaska")
 ALIASES = {
@@ -127,18 +131,24 @@ def _parse_time(s):
     return datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
 
 
-def fetch(source, days, minmag):
-    start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+class EventList(list):
+    capped = False      # True if the server cap still hid older events after paging
+
+
+def fetch_page(source, start, end, minmag):
+    """One FDSN request. Returns (events, raw line count, oldest raw time)."""
     q = {"format": "text", "starttime": start, "orderby": "time", "limit": LIMIT}
+    if end:
+        q["endtime"] = end
     if minmag > 0:
         q["minmagnitude"] = minmag
     url = SOURCES[source] + "?" + urllib.parse.urlencode(q)
     req = urllib.request.Request(url, headers={"User-Agent": "SEISBOX-Events/1.0"})
     with urllib.request.urlopen(req, timeout=25) as r:
         if r.status == 204:            # FDSN: no events
-            return []
+            return [], 0, None
         text = r.read().decode("utf-8", "replace")
-    out = []
+    out, nraw, oldest = [], 0, None
     for line in text.splitlines():
         if not line or line.startswith("#"):
             continue
@@ -149,10 +159,30 @@ def fetch(source, days, minmag):
             t = _parse_time(p[1])
         except ValueError:
             continue
+        nraw += 1
+        oldest = t if oldest is None or t < oldest else oldest
         if len(p) > 13 and p[13] and p[13] != "earthquake":
             continue                    # GFZ: skip explosions, quarry blasts…
         out.append(Event(t, _float(p[2]), _float(p[3]), _float(p[4]), _float(p[10]),
                          p[9] or "M", p[12].strip(), source, p[0].strip()))
+    return out, nraw, oldest
+
+
+def fetch(source, days, minmag):
+    """All events in the window. Servers return at most LIMIT per request, so page
+    backwards in time (endtime = oldest event so far) until the window is covered."""
+    start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    out, ids, end = EventList(), set(), None
+    for _ in range(MAX_PAGES):
+        evs, nraw, oldest = fetch_page(source, start, end, minmag)
+        for e in evs:
+            if e.evid not in ids:
+                ids.add(e.evid)
+                out.append(e)
+        if nraw < LIMIT or oldest is None:
+            return out
+        end = oldest.strftime("%Y-%m-%dT%H:%M:%S.%f")   # next page: older than this
+    out.capped = True
     return out
 
 
@@ -184,10 +214,10 @@ def merge(lists):
     return sorted(kept, key=lambda e: e.time, reverse=True)
 
 
-def limit_note(name, evs):
+def limit_note(name, evs):  # only used when paging hit MAX_PAGES
     """Server cap reached: older events in the time window are missing."""
     span = (evs[0].time - evs[-1].time).total_seconds() / 3600 if evs else 0
-    return f"{name}: newest {LIMIT} only (~{span:.0f}h), raise mag"
+    return f"{name}: newest {len(evs)} only (~{span:.0f}h), raise mag"
 
 
 def load(source, days, minmag):
@@ -199,11 +229,122 @@ def load(source, days, minmag):
             try:
                 r = f.result()
                 results.append(r)
-                if len(r) >= LIMIT:
+                if getattr(r, "capped", False):
                     errors.append(limit_note(n, r))
             except Exception as e:      # network/server problem: keep the others
                 errors.append(f"{n}: {e.__class__.__name__}")
     return merge(results), errors
+
+
+# ---------------------------------------------------------------- country borders
+OFFSHORE_KM = 200      # offshore quakes this close to a country's coast count for it
+_COUNTRIES = None
+_CACHE = {}
+
+
+def _country_file():
+    here = os.path.dirname(os.path.realpath(__file__))
+    for p in (os.path.join(os.environ.get("PREFIX", ""), "share", "seisbox", "countries.json"),
+              os.path.join(here, "..", "share", "countries.json")):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def countries():
+    """Natural Earth 1:110m outlines: [(display name, names, [(bbox, ring), ...]), ...]"""
+    global _COUNTRIES
+    if _COUNTRIES is None:
+        _COUNTRIES = []
+        f = _country_file()
+        if f:
+            import json
+            for c in json.load(open(f, encoding="utf-8"))["countries"]:
+                rings = []
+                for r in c["rings"]:
+                    xs, ys = [p[0] for p in r], [p[1] for p in r]
+                    rings.append(((min(xs), min(ys), max(xs), max(ys)), r))
+                _COUNTRIES.append((c["name"], set(c["names"]), rings))
+    return _COUNTRIES
+
+
+SYNONYMS = {"uk": "gbr", "britain": "gbr", "england": "gbr", "america": "usa",
+            "us": "usa", "türkiye": "tur", "turkiye": "tur", "persia": "irn",
+            "korea": "kor", "south korea": "kor", "north korea": "prk", "drc": "cod"}
+
+
+def find_countries(term):
+    """Countries whose name/ISO code equals the term (or starts with it, 4+ letters)."""
+    term = SYNONYMS.get(term, term)
+    if ("find", term) not in _CACHE:
+        cs = countries()
+        hit = [c for c in cs if term in c[1]]
+        if not hit and len(term) >= 4:
+            hit = [c for c in cs if any(n.startswith(term) for n in c[1])]
+        # add overseas territories of the same sovereign (Puerto Rico -> USA, Greenland -> Denmark)
+        sov = {h[0].lower() for h in hit}
+        hit += [c for c in cs if c not in hit and sov & c[1]]
+        _CACHE[("find", term)] = hit
+    return _CACHE[("find", term)]
+
+
+def _in_ring(x, y, r):
+    inside = False
+    j = len(r) - 1
+    for i in range(len(r)):
+        xi, yi = r[i]
+        xj, yj = r[j]
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+            inside = not inside
+        j = i
+    return inside
+
+
+def _inside(c, lon, lat):
+    return any(b[0] <= lon <= b[2] and b[1] <= lat <= b[3] and _in_ring(lon, lat, r) for b, r in c[2])
+
+
+def _on_land(lon, lat):
+    key = ("land", round(lon, 2), round(lat, 2))
+    if key not in _CACHE:
+        _CACHE[key] = any(_inside(c, lon, lat) for c in countries())
+    return _CACHE[key]
+
+
+def _dist_km(c, lon, lat, maxkm):
+    """Approximate distance (km) from a point to the country's outline, or inf if > maxkm."""
+    kx = 111.2 * math.cos(math.radians(lat))
+    pad = maxkm / 111.2
+    best = math.inf
+    for b, r in c[2]:
+        if not (b[0] - pad / max(0.1, math.cos(math.radians(lat))) <= lon <= b[2] + pad / max(0.1, math.cos(math.radians(lat)))
+                and b[1] - pad <= lat <= b[3] + pad):
+            continue
+        for (x1, y1), (x2, y2) in zip(r, r[1:]):
+            ax, ay = (x1 - lon) * kx, (y1 - lat) * 111.2
+            bx, by = (x2 - lon) * kx, (y2 - lat) * 111.2
+            dx, dy = bx - ax, by - ay
+            L = dx * dx + dy * dy
+            t = 0.0 if L == 0 else max(0.0, min(1.0, -(ax * dx + ay * dy) / L))
+            best = min(best, math.hypot(ax + t * dx, ay + t * dy))
+    return best
+
+
+def in_country(ev, term):
+    """Epicentre inside the country, or offshore within OFFSHORE_KM of its coast."""
+    if math.isnan(ev.lat) or math.isnan(ev.lon):
+        return False
+    key = ("in", term, round(ev.lon, 3), round(ev.lat, 3))
+    if key not in _CACHE:
+        hit = False
+        for c in find_countries(term):
+            if _inside(c, ev.lon, ev.lat):
+                hit = True
+                break
+        if not hit and find_countries(term) and not _on_land(ev.lon, ev.lat):
+            hit = any(_dist_km(c, ev.lon, ev.lat, OFFSHORE_KM) <= OFFSHORE_KM for c in find_countries(term))
+        _CACHE[key] = hit
+    return _CACHE[key]
 
 
 def matches(ev, country, minmag):
@@ -213,7 +354,11 @@ def matches(ev, country, minmag):
         return True
     reg = ev.region.lower()
     for term in (t.strip().lower() for t in country.split(",")):
-        if term and any(w in reg for w in ALIASES.get(term, [term])):
+        if not term:
+            continue
+        if any(w in reg for w in ALIASES.get(term, [term])):   # region-name text
+            return True
+        if in_country(ev, term):                                 # real country borders
             return True
     return False
 
@@ -303,7 +448,7 @@ class App:
                     n = futs[f]
                     try:
                         r = f.result()
-                        if len(r) >= LIMIT:
+                        if getattr(r, "capped", False):
                             errs.append(limit_note(n, r))
                     except Exception as e:      # keep this source's previous data
                         r = None
@@ -433,8 +578,8 @@ class App:
             self.put(5, 2, "or clear the region filter (c, then Enter on empty).")
 
         foot = self.msg or ("! " + "; ".join(self.errors) if self.errors else
-                            ("↑↓ Enter:info s:src m:mag c:region d:days r:reload l:live f/F:mechanism ?:help q"
-                             if w >= 86 else "Enter:info s m c d r l:live f:mech ?:help q"))
+                            ("↑↓ Enter:info s:src m:mag c:region d:days r l:live f:mechanism i:invert ?:help q"
+                             if w >= 86 else "Enter:info s m c d r l:live f:mech i:inv ?:help q"))
         fattr = (curses.color_pair(5) | curses.A_BOLD if self.msg.startswith("●") else
                  curses.color_pair(2 if self.errors and not self.msg else 1))
         self.put(h - 1, 0, foot.ljust(w), fattr)
@@ -497,14 +642,14 @@ class App:
             f"  t = UTCDateTime('{st}')",
             "  st = Client('IRIS').get_waveforms('IU','*','00','BHZ', t, t+3600)",
             "",
-            "f: focal mechanism   F: + own inversion",
+            "f: focal mechanism   i: + own inversion",
             "o: open web page   any other key: close",
         ]
         k = self.popup(lines)
         if k in (ord("o"), ord("O")):
             self.open_url(e)
-        elif k in (ord("f"), ord("F")):
-            self.mechanism(e, invert=(k == ord("F")))
+        elif k in INVERT_KEYS + (ord("f"),):
+            self.mechanism(e, invert=(k in INVERT_KEYS))
 
     def mechanism(self, e, invert):
         """Leave the TUI, run quakemt in geo (Ubuntu), then come back."""
@@ -626,8 +771,8 @@ class App:
                 self.details(self.view[self.sel])
             elif k in (ord("o"), ord("O")) and n:
                 self.open_url(self.view[self.sel])
-            elif k in (ord("f"), ord("F")) and n:
-                self.mechanism(self.view[self.sel], invert=(k == ord("F")))
+            elif k in INVERT_KEYS + (ord("f"),) and n:
+                self.mechanism(self.view[self.sel], invert=(k in INVERT_KEYS))
             elif k in (ord("s"), ord("S")):
                 self.source = SOURCE_CYCLE[(SOURCE_CYCLE.index(self.source) + 1) % len(SOURCE_CYCLE)]
                 self.sel = 0; self.reset_new(); self.refresh_data(force=True)
