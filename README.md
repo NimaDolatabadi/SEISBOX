@@ -619,8 +619,9 @@ sed -i '/seisbox.bashrc/d' ~/.bashrc
 
 ### Regenerating the images
 
-All README media are made on the phone from real data. Ubuntu can't see the Termux home
-folder by default, so the repo is bound into it as `/opt/seisbox`:
+All README media are made on the phone from real data. proot-distro shares the Termux home
+folder with Ubuntu (at the same path), so `geo` can read the repo directly. The commands below
+also bind it as `/opt/seisbox`, which gives the scripts a short fixed path:
 
 ```bash
 cd ~/SEISBOX

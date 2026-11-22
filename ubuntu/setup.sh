@@ -49,6 +49,12 @@ if "$VENV/bin/python" -c "import msnoise" 2>/dev/null; then
     sed -i '1i from . import _sa2_compat  # noqa: F401  (SEISBOX: SQLAlchemy 2 support)' "$MSN/__init__.py"
 fi
 
+echo "--> OpenQuake: accept read-only arrays in idx_start_stop (numba)"
+OQP="$SITE/openquake/baselib/performance.py"
+if [ -f "$OQP" ] && ! grep -q "SEISBOX patch" "$OQP"; then
+  cat "$SRC/ubuntu/openquake_readonly_fix.py" >> "$OQP"
+fi
+
 echo "--> quakemt (focal mechanisms / moment-tensor inversion)"
 install -m 755 "$SRC/ubuntu/quakemt.py" "$VENV/bin/quakemt"
 install -m 755 "$SRC/ubuntu/imgview.py" "$VENV/bin/imgview"   # used by seisview
