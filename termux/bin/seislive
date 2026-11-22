@@ -1,0 +1,11 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Live seismic viewer in Termux:X11.
+# Usage: seislive [NET.STA.LOC.CHA ...] [--minutes N] [--filter FMIN FMAX]
+PROJECTS="${SEISBOX_PROJECTS:-/sdcard/termux/projects}"
+if [ ! -S "$PREFIX/tmp/.X11-unix/X0" ] || ! pgrep -f "com.termux.x11 :0" >/dev/null; then
+  setsid nohup termux-x11 :0 >"$PREFIX/tmp/x11.log" 2>&1 </dev/null &
+  sleep 3
+fi
+am start -n com.termux.x11/.MainActivity >/dev/null 2>&1
+exec proot-distro login ubuntu --shared-tmp -- \
+  env DISPLAY=:0 /root/geo/bin/python "$PROJECTS/seis_live/seis_live.py" "$@"

@@ -1,0 +1,20 @@
+# Main packages (used with SEISBOX_PY=latest). GDAL bindings are added by
+# setup.sh pinned to the system GDAL version. For the exact tested set see
+# requirements-lock.txt (the default).
+numpy
+scipy
+pandas
+matplotlib
+ipython
+obspy
+pyrocko
+hvsrpy
+pygmt
+geopandas
+shapely
+pyproj
+trimesh
+xarray
+numba
+openquake.engine
+plotext==5.3.2   # 6.x dropped the plt.plot() API

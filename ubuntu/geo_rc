@@ -1,0 +1,5 @@
+# Startup file for the `geo` shell (Ubuntu side). Installed as /root/.geo_rc
+[ -f ~/.bashrc ] && . ~/.bashrc
+. ~/geo/bin/activate
+export MPLBACKEND="${DISPLAY:+TkAgg}"   # real windows when an X11 display exists
+[ -z "$MPLBACKEND" ] && unset MPLBACKEND
