@@ -419,12 +419,35 @@ def greens(ev, stations, depth_km, t_end, band, n):
     return g
 
 
-def expand_greens(graw, stations, band, bband, use_body):
+def half_duration(mag):
+    """Source half-duration (s) from moment scaling (Ekström et al. 2012, GCMT):
+    hd = 1.05e-8 * M0^(1/3), M0 in dyne-cm. M6.8 -> ~6 s, M5.5 -> ~1.5 s."""
+    m0_dyne_cm = 10 ** (1.5 * mag + 9.1) * 1e7
+    return 1.05e-8 * m0_dyne_cm ** (1 / 3)
+
+
+def stf_kernel(hd):
+    """Causal triangle of half-duration hd, unit area, sampled at DT."""
+    if hd < DT:
+        return None
+    t = np.arange(0, 2 * hd + DT, DT)
+    k = np.maximum(0, 1 - np.abs(t - hd) / hd)
+    return k / k.sum()
+
+
+def apply_stf(x, k):
+    return x if k is None else np.convolve(x, k)[:len(x)]
+
+
+def expand_greens(graw, stations, band, bband, use_body, stf=None):
+    """Raw synthetics -> filtered traces per inversion component, convolved with the
+    source time function (issue #2: an instantaneous source overestimates amplitudes)."""
     dist = {f"{s['net']}.{s['sta']}": s["dist"] for s in stations}
     g = {}
     for key, comps in graw.items():
         if not all(all(x is not None for x in comps.get(c, [None])) for c in "ZRT"):
             continue
+        comps = {c: [apply_stf(x, stf) for x in comps[c]] for c in "ZRT"}
         g[key] = {c: [filt(x, band) for x in comps[c]] for c in "ZRT"}
         if use_body and BODY_DMIN <= dist.get(key, 0) <= BODY_DMAX:
             g[key]["BZ"] = [filt(x, bband) for x in comps["Z"]]
@@ -548,6 +571,9 @@ def invert(ev, args, outdir):
     band = tuple(float(x) for x in args.band.split(",")) if args.band else band_for(ev["mag"])
     bband = body_band_for(ev["mag"])
     use_body = not args.no_body
+    stf = None if args.no_stf else stf_kernel(half_duration(ev["mag"]))
+    detail(f"  source time function: " + ("none" if stf is None else
+           f"triangle, half-duration {half_duration(ev['mag']):.1f} s"))
     say("\n▶ Own inversion (about 1-3 min)")
     detail(f"  waveform inversion: full waveforms {band[0]:.0f}-{band[1]:.0f} s"
            + (f" + body waves (P on Z, SH on T) {bband[0]:.0f}-{bband[1]:.0f} s at "
@@ -597,6 +623,13 @@ def invert(ev, args, outdir):
             if sig > 0 and (noise == 0 or sig / noise > 3):
                 keys.append((key, c))
 
+    # Below M6 the long-period waveforms are too noisy / too model-dependent; body waves
+    # alone solved M5.4-5.9 quakes that full waveforms could not (issue #3: Peru M5.9
+    # 1-6 deg, Colombia M5.4 9 deg from GFZ, Guatemala M5.5 18-21 deg; VR 59-71 %).
+    body_only = use_body and (args.body_only or (ev["mag"] < 6.0 and not args.with_surface))
+    if body_only:
+        keys = [k for k in keys if k[1] in BODY_COMPS]
+        detail("  using body waves only (below M6)")
     nsta_clear = len({k for k, _ in keys})
     nbody = sum(1 for _, c in keys if c in BODY_COMPS)
     detail(f"  traces with clear signal (SNR > 3): {len(keys)} ({nbody} body-wave) from {nsta_clear} stations")
@@ -621,7 +654,8 @@ def invert(ev, args, outdir):
         dep = queue.pop(0)
         progress(f"Green's functions + inversion at {dep:.0f} km depth "
                  f"({len(results) + 1}/{len(results) + len(queue) + 1})…")
-        gcache[dep] = expand_greens(greens(ev, stations, dep, t_end, band, n), stations, band, bband, use_body)
+        gcache[dep] = expand_greens(greens(ev, stations, dep, t_end, band, n), stations, band, bband,
+                                    use_body, stf)
         use = [k for k in keys if k[0] in gcache[dep] and k[1] in gcache[dep][k[0]]
                and all(x is not None for x in gcache[dep][k[0]][k[1]])]
         # station lags are fitted once at the catalogue depth and then kept fixed, so
@@ -862,6 +896,11 @@ def main():
     p.add_argument("--dmax", type=float, default=None, help="max distance, deg (default 90)")
     p.add_argument("--depths", default="", help="comma list of trial depths, km")
     p.add_argument("--band", default="", help="period band 'Tmin,Tmax' in s (default by magnitude)")
+    p.add_argument("--no-stf", action="store_true",
+                   help="no source time function (instantaneous source) in the synthetics")
+    p.add_argument("--body-only", action="store_true", help="P/SH body waves only (default below M6)")
+    p.add_argument("--with-surface", action="store_true",
+                   help="below M6: also fit the long-period waveforms (normally body waves only)")
     p.add_argument("--no-body", action="store_true",
                    help="full long-period waveforms only (no P/SH body-wave windows)")
     p.add_argument("--maxlag", type=float, default=None,

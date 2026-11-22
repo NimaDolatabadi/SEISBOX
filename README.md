@@ -420,9 +420,12 @@ GFZ GEOFON moment tensor. They usually appear 20–60 min after an M5+ quake.
 2. Removes the response and rotates to Z/R/T displacement, filtered at 50–100 s (35–80 s below M6).
    It also cuts **body-wave windows** (P on Z, SH on T) at 15–50 s (12–40 s below M6) for
    stations 30–90° away. Each window is long enough to include the depth phases pP/sP, whose
-   delay after P/S fixes the depth.
+   delay after P/S fixes the depth. **Below M6 only the body waves are used**: the long-period
+   waveforms are too weak there. Use `--with-surface` to add them anyway.
 3. Gets Green's functions from **IRIS Syngine** (AxiSEM, anisotropic PREM): six unit moment tensors
-   for all stations at each trial depth. The heavy computation happens on IRIS's servers.
+   for all stations at each trial depth. The heavy computation happens on IRIS's servers. They
+   are convolved with a triangular **source time function** whose half-duration comes from the
+   magnitude (GCMT scaling, about 6 s for M6.8; `--no-stf` to turn off).
 4. Solves a **deviatoric moment tensor** by linear least squares on full waveforms (body and
    surface waves). It grid-searches centroid depth (extending the search if the best depth is at the
    edge) and centroid time shift. Each station gets a small time lag (±30 s, separately for
@@ -442,13 +445,20 @@ Validation on recent quakes:
 
 | Quake | Stations | SEISBOX result | Published | Difference |
 |---|---|---|---|---|
-| M6.8 Banda Sea, 21 Nov 2026, 116 km | 30 stations (139 traces, 55 body-wave), gap 34° | Mw 6.74, thrust, **116 km**, VR 55 % | USGS Mww 6.81, 128°/25°/98° (other plane 299°/65°/86°), 100 km · Mwc 103 km · Mwb 129 km · GFZ 6.79, 129 km | Kagan **1–3°**, ΔMw −0.02 to −0.09 |
-| M6.7 Peru, 21 Nov 2026, 108 km | 29 stations (139 traces, 57 body-wave), gap 47° | Mw 6.63, strike-slip, **108 km** (108–128), VR 46 % | USGS Mww 6.73, 21°/82°/−4°, 130 km · Mwb 126 km · GFZ 6.68, 115 km | Kagan **6–11°**, ΔMw −0.05 to −0.10 |
-| M5.4–5.9: Yanglong China, Peru, Guatemala, Japan, Colombia | 8–37 usable | **refused** (VR 7–32 %) | USGS/GFZ Mw 5.4–5.9 | Not reliable in this period band. One trial setup printed a "poor" Colombia result that was 61–81° wrong, hence the 35 % cut-off. Yanglong and Japan were also masked by bigger quakes 63 and 78 min earlier, and the tool says so. |
+| M6.8 Banda Sea, 21 Nov 2026, 116 km | 30 stations (139 traces, 55 body-wave), gap 34° | Mw 6.74, thrust, **116 km**, VR 57 % | USGS Mww 6.81, 128°/25°/98° (other plane 299°/65°/86°), 100 km · Mwc 103 km · Mwb 129 km · GFZ 6.79, 129 km | Kagan **1–3°**, ΔMw −0.02 to −0.07 |
+| M6.7 Peru, 21 Nov 2026, 108 km | 29 stations (139 traces, 57 body-wave), gap 47° | Mw 6.66, strike-slip, **128 km**, VR 46 % | USGS Mww 6.73, 21°/82°/−4°, 130 km · Mwb 126 km · GFZ 6.68, 115 km | Kagan **7–11°**, ΔMw −0.01 (GFZ) to −0.07 (USGS) |
+| M5.9 Peru (San Juan), 18 Nov 2026, 22 km | body waves only | Mw 5.84, 12 km, VR 71 % | USGS Mww 5.9 · GFZ | Kagan **1° (GFZ), 6° (USGS)**, ΔMw +0.02 / −0.04 |
+| M5.4 Colombia, 3 Nov 2026, 10 km | body waves only | Mw 5.39, 10 km, VR 65 % | USGS Mww 5.4 · GFZ (USGS and GFZ differ by 21°) | Kagan **9° (GFZ)**, 30° (USGS), ΔMw +0.09 / +0.02 |
+| M5.5 Guatemala, 10 Nov 2026, 60 km | body waves only | Mw 5.60, 30 km, VR 59 % | USGS Mww 5.5 · GFZ | Kagan 18–21°, ΔMw +0.03 / +0.07 |
+| M5.9 Yanglong China · M5.7 off Japan | — | **refused**, correctly | GFZ / USGS | Came 63 and 78 min after an M6.8 and an M6.4 whose waves still dominated the records at 12–100 s. The tool names the masking quake. |
+
+Before body waves and the source time function, the same Banda Sea quake gave 136 km depth with a flat
+misfit curve, and all M5.4–5.9 quakes were refused (or, worse, a 61–81° wrong "poor" result).
 
 **Limits.**
-- In practice needs about **M6+**. Tests on five M5.4–5.9 quakes all ended in a refusal; smaller
-  quakes need body waves or local data and models (open issue #3).
+- Works from about **M5.4** (body waves only below M6). Smaller quakes need local stations and
+  regional models. It fails when a bigger quake shortly before still dominates the records; the
+  tool then says so.
 - **Depth** comes mainly from the body-wave depth phases. Without body waves (`--no-body`) the
   long-period fit hardly resolves depth: Banda Sea gave 136 km with a flat misfit curve, and
   116 km with body waves. Still check the reported depth range.
