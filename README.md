@@ -413,32 +413,40 @@ GFZ GEOFON moment tensor. They usually appear 20–60 min after an M5+ quake.
 
 **Layer 2 (`i`, about 1–3 min): own inversion from raw waveforms.**
 
-1. Picks about 24–33 global broadband stations (IU, II, G, GE, IC, CU, GT, MN) 25–90° away (12–60° below M6), spread
+1. Requests about 48 global broadband stations (IU, II, G, GE, IC, CU, GT, MN) 25–90° away, spread
    evenly in azimuth, and downloads 3-component long-period (LH, 1 sample/s) data and instrument
-   responses from all FDSN data centres through the IRIS federator.
-2. Removes the response and rotates to Z/R/T displacement, filtered at 50–100 s (40–90 s below M6).
+   responses from all FDSN data centres through the IRIS federator. Any sensor location code with
+   all three components is used. Of the usable stations, up to 30 with the best azimuth spread are kept.
+2. Removes the response and rotates to Z/R/T displacement, filtered at 50–100 s (35–80 s below M6).
 3. Gets Green's functions from **IRIS Syngine** (AxiSEM, anisotropic PREM): six unit moment tensors
    for all stations at each trial depth. The heavy computation happens on IRIS's servers.
 4. Solves a **deviatoric moment tensor** by linear least squares on full waveforms (body and
    surface waves). It grid-searches centroid depth (extending the search if the best depth is at the
    edge) and centroid time shift. Each station gets a small time lag (±30 s, separately for
-   Rayleigh Z/R and Love T) to absorb 3-D Earth travel-time errors, as in the CAP method.
-5. Drops traces it cannot fit, re-solves, and reports Mw, M0, both nodal planes, P/T/B axes,
-   fault type, double-couple / CLVD %, centroid depth (with the range that fits nearly as well),
-   variance reduction (VR), azimuthal gap, and the **Kagan angle** (difference) to each published solution.
+   Rayleigh Z/R and Love T) to absorb 3-D Earth travel-time errors, as in the CAP method. The lags
+   are fitted once at the catalogue depth and then kept fixed during the depth search.
+5. Drops traces it cannot fit and re-solves. M0 is then taken from the median amplitude ratio of
+   the well-fitting traces, which is less biased low than the least-squares fit over all traces.
+   It reports Mw, M0, both nodal planes, P/T/B axes, fault type, double-couple / CLVD %, centroid
+   depth (with the range that fits nearly as well), variance reduction (VR), azimuthal gap, and the
+   **Kagan angle** (difference) to each published solution.
+6. **Refuses** instead of guessing when VR < 35 %, when Mw is more than 1 unit off the catalogue,
+   or when too few records have clear signal. It also warns if a bigger quake in the 3 h before may be
+   masking the event.
 
-Validation on recent quakes (published solutions = USGS):
+Validation on recent quakes:
 
-| Quake | Distances / stations | SEISBOX result | Published | Difference |
+| Quake | Stations | SEISBOX result | Published | Difference |
 |---|---|---|---|---|
-| M6.8 Banda Sea, 21 Nov 2026, 116 km | 25–90°, 26 stations, gap 23° | Mw 6.75, thrust 305°/56°/93°, 136 km (116–156), VR 62 % | USGS Mww 6.81, 299°/65°/86°, 100 km · GFZ 6.79, 129 km | Kagan 12–13°, ΔMw −0.02 to −0.09 |
-| M6.7 Peru, 21 Nov 2026, 108 km | 25–90°, 19 stations, gap 58° | Mw 6.57, strike-slip 20°/68°/0°, 128 km (88–148), VR 50 % | USGS Mww 6.73, 21°/82°/−4°, 130 km · GFZ 6.68, 115 km | Kagan 6–15°, ΔMw −0.10 to −0.16 |
-| M5.9 Yanglong, China, 21 Nov 2026 | 12–60°, 19 stations | **refused**: only 5 traces with clear signal | GFZ Mw 5.70 | Came 63 min after the M6.8 Banda Sea quake, whose surface waves still filled the records. The tool says so instead of guessing. |
+| M6.8 Banda Sea, 21 Nov 2026, 116 km | 30 of 37 usable, gap 34° | Mw 6.79, thrust 129°/25°/97°, 136 km (116–156), VR 59 % | USGS Mww 6.81, 128°/25°/98° (other plane 299°/65°/86°), 100 km · Mwb 129 km · GFZ 6.79, 129 km | Kagan **2–6°**, ΔMw −0.05 to +0.02 |
+| M6.7 Peru, 21 Nov 2026, 108 km | 29 of 38 usable, gap 47° | Mw 6.63, strike-slip 20°/69°/−3°, 128 km (108–148), VR 50 % | USGS Mww 6.73, 21°/82°/−4°, 130 km · GFZ 6.68, 115 km | Kagan **7–14°**, ΔMw −0.05 to −0.11 |
+| M5.4–5.9: Yanglong China, Peru, Guatemala, Japan, Colombia | 8–37 usable | **refused** (VR 7–32 %) | USGS/GFZ Mw 5.4–5.9 | Not reliable in this period band. One trial setup printed a "poor" Colombia result that was 61–81° wrong, hence the 35 % cut-off. Yanglong and Japan were also masked by bigger quakes 63 and 78 min earlier, and the tool says so. |
 
 **Limits.**
-- Needs about **M5.5+**: smaller quakes are too weak at 50–100 s periods and need local data and
-  models instead.
-- **Depth is the least certain number** (often ±20 km). Use the reported range.
+- In practice needs about **M6+**. Tests on five M5.4–5.9 quakes all ended in a refusal; smaller
+  quakes need body waves or local data and models (open issue #3).
+- **Depth is the least certain number** (often ±20 km, and so far biased deep for these
+  intermediate-depth quakes). Use the reported range (open issue #1).
 - The two nodal planes fit equally well, so the waveforms **cannot tell which one is the real
   fault**. Aftershocks, surface rupture or known faults decide that.
 - Rupture length, area and slip are not measured by this method.

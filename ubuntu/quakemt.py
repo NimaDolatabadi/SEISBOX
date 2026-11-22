@@ -567,7 +567,10 @@ def invert(ev, args, outdir):
         gcache[dep] = greens(ev, stations, dep, t_end, band, n)
         use = [k for k in keys if k[0] in gcache[dep] and k[1] in gcache[dep][k[0]]
                and all(x is not None for x in gcache[dep][k[0]][k[1]])]
-        if args.fixed_lags and ref_lags is not None:
+        # station lags are fitted once at the catalogue depth and then kept fixed, so
+        # they cannot absorb depth differences (tested in issue #1: mechanism 2-14 deg
+        # from USGS, same depth as re-fitting, and faster)
+        if ref_lags is not None:
             sol = solve_fixed(use, data, gcache[dep], win, shifts, ref_lags)
         else:
             sol = solve(use, data, gcache[dep], win, shifts, maxlag=args.maxlag)
@@ -576,7 +579,7 @@ def invert(ev, args, outdir):
         tv = trace_vr(sol)
         good = [k for k in use if tv[k] > -20]
         if len(good) >= 8 and len(good) < len(use):
-            sol = (solve_fixed(good, data, gcache[dep], win, shifts, ref_lags) if args.fixed_lags
+            sol = (solve_fixed(good, data, gcache[dep], win, shifts, ref_lags) if ref_lags is not None
                    else solve(good, data, gcache[dep], win, shifts, maxlag=args.maxlag))
             use = good
         sol.update(depth=dep, keys=use)
@@ -592,7 +595,10 @@ def invert(ev, args, outdir):
             elif top == done[0] and top - step >= 5:
                 queue.append(top - step)
     best = max(results, key=lambda r: r["vr"])
-    if args.amp_scale:
+    # scalar moment from the median amplitude ratio of well-fitting traces: least squares
+    # over all traces is pulled low by misfit (issue #2: Banda dMw -0.07 -> -0.02,
+    # Peru -0.16 -> -0.11 vs USGS Mww)
+    if True:
         tv = trace_vr(best)
         pos, ratios = 0, []
         for key, c, _, nn in best["idx"]:
@@ -801,8 +807,6 @@ def main():
     p.add_argument("--name", default="", help="folder name under $SEISBOX_PROJECTS/mt "
                    "(default: date_time_magnitude_region)")
     p.add_argument("--outdir", default="", help="full output folder path (overrides --name)")
-    p.add_argument("--fixed-lags", action="store_true", help=argparse.SUPPRESS)   # experiment, issue #1
-    p.add_argument("--amp-scale", action="store_true", help=argparse.SUPPRESS)    # experiment, issue #2
     p.add_argument("--no-terminal-plot", action="store_true", help=argparse.SUPPRESS)  # kept for old calls
     a = p.parse_args()
 
