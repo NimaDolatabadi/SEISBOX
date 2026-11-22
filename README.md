@@ -3,7 +3,7 @@
 **A Python seismology workstation on an Android phone.** It runs in Termux, with no root.
 
 SEISBOX gives you a full Python 3.12 scientific and seismology stack on your phone:
-ObsPy, Pyrocko, OpenQuake Engine, PyGMT (with GMT 6.5), GeoPandas, hvsrpy, NumPy, SciPy,
+ObsPy, Pyrocko, OpenQuake Engine, MSNoise, PyGMT (with GMT 6.5), GeoPandas, hvsrpy, NumPy, SciPy,
 pandas, numba and more. You also get plots in the terminal, real plot windows through
 Termux:X11, and a live seismogram viewer.
 
@@ -197,6 +197,8 @@ Notable pins:
 
 * `numpy==2.2.6`, `numba==0.61.2`: numba only supports specific NumPy versions.
 * `plotext==5.3.2`: version 6 removed the `plt.plot()` style API.
+* `setuptools<81`: MSNoise 1.6.5 still imports `pkg_resources`, which setuptools 81 removed.
+  You may see a harmless `pkg_resources is deprecated` warning when running `msnoise`.
 
 ### 4.5 Terminal plotting helper (`tplot`)
 
@@ -312,6 +314,30 @@ python irsc_bulletin.py --start 2024-06-01 --end 2024-07-01
 python irsc_bulletin.py --start 2024-01-01 --lat 35.7 --lon 51.4 --radius 2
 python irsc_tui.py            # full-screen form (curses)
 ```
+
+### MSNoise: ambient-noise monitoring (dv/v)
+
+MSNoise 1.6.5 is installed with a SQLite database backend (no MySQL server needed). Each project
+is a folder holding its `db.ini` and database:
+
+```bash
+geo
+mkdir -p /sdcard/termux/projects/noise && cd /sdcard/termux/projects/noise
+msnoise db init                 # choose 1 (sqlite), then accept defaults
+msnoise config set data_folder=/sdcard/termux/projects/noise/SDS
+msnoise config set data_structure=SDS
+msnoise populate                # fill the station table from the archive
+msnoise scan_archive --init
+msnoise new_jobs --init
+msnoise compute_cc              # cross-correlations
+msnoise info                    # status of config and jobs
+```
+
+`msnoise admin` starts the web configuration page. Open the printed `http://localhost:5000`
+address in your phone's browser.
+
+Ambient-noise processing is heavy. On a phone, start with a few stations and days, and keep
+Termux in the foreground (or use **Acquire wakelock**).
 
 ---
 

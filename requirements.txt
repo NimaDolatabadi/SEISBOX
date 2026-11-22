@@ -17,4 +17,5 @@ trimesh
 xarray
 numba
 openquake.engine
+msnoise
 plotext==5.3.2   # 6.x dropped the plt.plot() API

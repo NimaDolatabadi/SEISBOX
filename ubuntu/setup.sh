@@ -18,7 +18,8 @@ apt-get install -y \
 
 echo "--> venv $VENV"
 [ -x "$VENV/bin/python" ] || python3 -m venv "$VENV"
-"$VENV/bin/pip" install -U pip setuptools wheel
+# setuptools<81: MSNoise 1.6 still imports pkg_resources (removed in 81)
+"$VENV/bin/pip" install -U pip "setuptools<81" wheel
 
 GDAL_VER="$(gdal-config --version)"   # 3.8.4 on Ubuntu 24.04
 if [ "$MODE" = latest ]; then
@@ -47,7 +48,7 @@ echo "--> quick self-test"
 "$VENV/bin/python" - <<'PY'
 import importlib
 mods = ["numpy", "scipy", "pandas", "matplotlib", "obspy", "pyrocko", "hvsrpy",
-        "pygmt", "geopandas", "shapely", "pyproj", "trimesh", "numba",
+        "pygmt", "geopandas", "msnoise", "shapely", "pyproj", "trimesh", "numba",
         "openquake.engine", "osgeo.gdal", "tkinter", "tplot"]
 bad = []
 for m in mods:
