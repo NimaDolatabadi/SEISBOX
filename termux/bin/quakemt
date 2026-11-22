@@ -1,0 +1,6 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# quakemt: focal mechanism / moment tensor of an earthquake (runs in the geo env).
+#   quakemt --time 2026-11-21T09:42:07 --lat -7.62 --lon 127.39 --depth 116 --mag 6.8 [--invert]
+# Easiest: open Events, select a quake, press f (published) or F (own inversion).
+exec proot-distro login ubuntu -- env SEISBOX_PROJECTS="${SEISBOX_PROJECTS:-/sdcard/termux/projects}" \
+  TERM="${TERM:-xterm-256color}" /root/geo/bin/quakemt "$@"

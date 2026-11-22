@@ -19,6 +19,8 @@ Keys (TUI):
   c  country/region text filter           d  time window (1/3/7/30 days)
   r  refresh now                          o  open selected quake's web page
   l  live mode on/off (refresh every 30 s, new quakes marked ● + beep)
+  f  focal mechanism: published USGS/GFZ moment tensors of the selected quake
+  F  focal mechanism + own waveform inversion (needs geo, ~2-5 min, M5.5+)
   ?  help                                 q  quit
 Auto-refreshes every 5 minutes; in live mode every 30 s (Events --live 15 for 15 s).
 
@@ -27,6 +29,7 @@ Uses only the Python standard library (runs on Termux's own python).
 import argparse
 import curses
 import math
+import os
 import subprocess
 import sys
 import threading
@@ -59,6 +62,8 @@ c or /  country/region filter
           (empty = everything)
 d       days: 1 → 3 → 7 → 30
 r       reload now (auto every 5 min)
+f       focal mechanism (USGS/GFZ published)
+F       + own moment-tensor inversion (M5.5+)
 l       LIVE mode on/off: reload every 30 s,
           new quakes get a green ● and a beep
 q       quit
@@ -413,8 +418,8 @@ class App:
             self.put(5, 2, "or clear the region filter (c, then Enter on empty).")
 
         foot = self.msg or ("! " + "; ".join(self.errors) if self.errors else
-                            ("↑↓ Enter:info s:src m:mag c:region d:days r:reload l:live o:web ?:help q:quit"
-                             if w >= 82 else "Enter:info s m c d r:reload l:live ?:help q"))
+                            ("↑↓ Enter:info s:src m:mag c:region d:days r:reload l:live f/F:mechanism ?:help q"
+                             if w >= 86 else "Enter:info s m c d r l:live f:mech ?:help q"))
         fattr = (curses.color_pair(5) | curses.A_BOLD if self.msg.startswith("●") else
                  curses.color_pair(2 if self.errors and not self.msg else 1))
         self.put(h - 1, 0, foot.ljust(w), fattr)
@@ -477,10 +482,50 @@ class App:
             f"  t = UTCDateTime('{st}')",
             "  st = Client('IRIS').get_waveforms('IU','*','00','BHZ', t, t+3600)",
             "",
+            "f: focal mechanism   F: + own inversion",
             "o: open web page   any other key: close",
         ]
-        if self.popup(lines) in (ord("o"), ord("O")):
+        k = self.popup(lines)
+        if k in (ord("o"), ord("O")):
             self.open_url(e)
+        elif k in (ord("f"), ord("F")):
+            self.mechanism(e, invert=(k == ord("F")))
+
+    def mechanism(self, e, invert):
+        """Leave the TUI, run quakemt in geo (Ubuntu), then come back."""
+        proj = os.environ.get("SEISBOX_PROJECTS", "/sdcard/termux/projects")
+        outdir = f"{proj}/mt/{e.time:%Y%m%d_%H%M%S}_M{e.mag:.1f}"
+        cmd = ["proot-distro", "login", "ubuntu", "--", "env", f"SEISBOX_PROJECTS={proj}",
+               "/root/geo/bin/quakemt", "--time", e.time.strftime("%Y-%m-%dT%H:%M:%S.%f"),
+               "--lat", str(e.lat), "--lon", str(e.lon),
+               "--depth", str(0 if math.isnan(e.depth) else e.depth),
+               "--mag", str(0 if math.isnan(e.mag) else e.mag), "--region", e.region,
+               "--outdir", outdir] + (["--invert"] if invert else [])
+        curses.def_prog_mode()
+        curses.endwin()
+        print("\033[2J\033[H", end="", flush=True)
+        try:
+            rc = subprocess.call(cmd)
+        except FileNotFoundError:
+            rc = -1
+            print("proot-distro not found — quakemt needs the SEISBOX Ubuntu/geo setup.")
+        while True:
+            try:
+                ans = input("\n[o] open beachball image  [w] open waveform fits  "
+                            "[Enter] back to Events: ").strip().lower()
+            except EOFError:
+                ans = ""
+            if ans in ("o", "w"):
+                f = f"{outdir}/{'report' if ans == 'o' else 'fits'}.png"
+                if os.path.exists(f):
+                    subprocess.call(["termux-open", f], stderr=subprocess.DEVNULL)
+                else:
+                    print("not found:", f)
+                continue
+            break
+        curses.reset_prog_mode()
+        self.scr.clear()
+        self.msg = f"mechanism saved in {outdir}" if rc == 0 else "quakemt failed (see output)"
 
     def open_url(self, e):
         try:
@@ -556,6 +601,8 @@ class App:
                 self.details(self.view[self.sel])
             elif k in (ord("o"), ord("O")) and n:
                 self.open_url(self.view[self.sel])
+            elif k in (ord("f"), ord("F")) and n:
+                self.mechanism(self.view[self.sel], invert=(k == ord("F")))
             elif k in (ord("s"), ord("S")):
                 self.source = SOURCE_CYCLE[(SOURCE_CYCLE.index(self.source) + 1) % len(SOURCE_CYCLE)]
                 self.sel = 0; self.reset_new(); self.refresh_data(force=True)

@@ -51,6 +51,7 @@ proot-distro login "$DISTRO" --bind "$REPO:/opt/seisbox" \
 say "6/6  Termux shortcuts, welcome screen, example projects"
 install -m 755 "$REPO/termux/bin/seislive" "$PREFIX/bin/seislive"
 install -m 755 "$REPO/termux/bin/Events" "$PREFIX/bin/Events"
+install -m 755 "$REPO/termux/bin/quakemt" "$PREFIX/bin/quakemt"
 ln -sf Events "$PREFIX/bin/events"
 cp "$REPO/termux/seisbox.bashrc" "$HOME/.seisbox.bashrc"
 sed -i "s|^export SEISBOX_PROJECTS=.*|export SEISBOX_PROJECTS=\"$PROJECTS\"|" "$HOME/.seisbox.bashrc"

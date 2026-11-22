@@ -349,6 +349,8 @@ Events --live                  # start in live mode (30 s); Events --live 15 for
 | `c` or `/` | country/region filter. Text is matched against the region name; commas mean OR (`japan,chile`). `usa` also matches US states and `, CA` |
 | `d` | time window: 1 → 3 → 7 → 30 days |
 | `r` | reload now (it also refreshes itself every 5 minutes) |
+| `f` | **focal mechanism**: published USGS/GFZ moment tensors of the selected quake (see below) |
+| `F` | focal mechanism **+ own waveform inversion** (M5.5+, about 1–3 min) |
 | `l` | **live mode** on/off: reloads every 30 s with a countdown in the header. Quakes that arrive while you watch get a green `●` for 10 minutes, and the phone beeps |
 | `?` / `q` | help / quit |
 
@@ -360,6 +362,53 @@ cut off. Raise the magnitude or shorten the window.
 
 USGS and EMSC usually answer in under a second, while GFZ can take 5–10 s. The list fills in as each
 service answers, and a service that fails keeps its previous results on screen.
+
+### `quakemt`: focal mechanisms and moment tensors
+
+Select a quake in `Events` and press **`f`** or **`F`**, or run `quakemt` directly
+(`quakemt --help`). Results are printed in the terminal (with beachballs drawn as text) and saved to
+`/sdcard/termux/projects/mt/<date>_<time>_M<mag>/` as `report.png` (beachballs), `fits.png`
+(waveform fits) and `solution.json`.
+
+<p align="center"><img src="docs/media/mt-report.png" width="760" alt="SEISBOX moment tensor (red) next to USGS and GFZ solutions (blue)"></p>
+
+**Layer 1 (`f`, seconds): published solutions.** Every moment tensor or focal mechanism USGS has for
+the event (W-phase *Mww*, centroid *Mwc*, body-wave *Mwb*, regional *Mwr*, first-motion), plus the
+GFZ GEOFON moment tensor. They usually appear 20–60 min after an M5+ quake.
+
+**Layer 2 (`F`, about 1–3 min): own inversion from raw waveforms.**
+
+1. Picks about 24–33 global broadband stations (IU, II, G, GE, IC, CU, GT, MN) 25–90° away (12–60° below M6), spread
+   evenly in azimuth, and downloads 3-component long-period (LH, 1 sample/s) data and instrument
+   responses from all FDSN data centres through the IRIS federator.
+2. Removes the response and rotates to Z/R/T displacement, filtered at 50–100 s (40–90 s below M6).
+3. Gets Green's functions from **IRIS Syngine** (AxiSEM, anisotropic PREM): six unit moment tensors
+   for all stations at each trial depth. The heavy computation happens on IRIS's servers.
+4. Solves a **deviatoric moment tensor** by linear least squares on full waveforms (body and
+   surface waves). It grid-searches centroid depth (extending the search if the best depth is at the
+   edge) and centroid time shift. Each station gets a small time lag (±30 s, separately for
+   Rayleigh Z/R and Love T) to absorb 3-D Earth travel-time errors, as in the CAP method.
+5. Drops traces it cannot fit, re-solves, and reports Mw, M0, both nodal planes, P/T/B axes,
+   fault type, double-couple / CLVD %, centroid depth (with the range that fits nearly as well),
+   variance reduction (VR), azimuthal gap, and the **Kagan angle** (difference) to each published solution.
+
+Validation on recent quakes (published solutions = USGS):
+
+| Quake | Distances / stations | SEISBOX result | Published | Difference |
+|---|---|---|---|---|
+| M6.8 Banda Sea, 21 Nov 2026, 116 km | 25–90°, 26 stations, gap 23° | Mw 6.75, thrust 305°/56°/93°, 136 km (116–156), VR 62 % | USGS Mww 6.81, 299°/65°/86°, 100 km · GFZ 6.79, 129 km | Kagan 12–13°, ΔMw −0.02 to −0.09 |
+| M6.7 Peru, 21 Nov 2026, 108 km | 25–90°, 19 stations, gap 58° | Mw 6.57, strike-slip 20°/68°/0°, 128 km (88–148), VR 50 % | USGS Mww 6.73, 21°/82°/−4°, 130 km · GFZ 6.68, 115 km | Kagan 6–15°, ΔMw −0.10 to −0.16 |
+| M5.9 Yanglong, China, 21 Nov 2026 | 12–60°, 19 stations | **refused**: only 5 traces with clear signal | GFZ Mw 5.70 | Came 63 min after the M6.8 Banda Sea quake, whose surface waves still filled the records. The tool says so instead of guessing. |
+
+**Limits.**
+- Needs about **M5.5+**: smaller quakes are too weak at 50–100 s periods and need local data and
+  models instead.
+- **Depth is the least certain number** (often ±20 km). Use the reported range.
+- The two nodal planes fit equally well, so the waveforms **cannot tell which one is the real
+  fault**. Aftershocks, surface rupture or known faults decide that.
+- Rupture length, area and slip are not measured by this method.
+- Quality drops with fewer stations or a large azimuthal gap (ocean regions). Check VR and the
+  fit plot before trusting a result. The comparison with USGS/GFZ is the quickest sanity check.
 
 ### `irsc_bulletin`: Iranian Seismological Center catalogue
 
@@ -411,6 +460,7 @@ SEISBOX/
 ├── requirements.txt            # main packages, unpinned (SEISBOX_PY=latest)
 ├── ubuntu/
 │   ├── setup.sh                # runs inside Ubuntu: apt + venv + pip + self-test
+│   ├── quakemt.py              # → /root/geo/bin/quakemt (focal mechanisms / MT inversion)
 │   ├── geo_rc                  # → /root/.geo_rc
 │   └── tplot.py                # → venv site-packages
 ├── termux/
@@ -419,7 +469,8 @@ SEISBOX/
 │   ├── gnuplot                 # → ~/.gnuplot (braille terminal output)
 │   └── bin/
 │       ├── seislive            # → $PREFIX/bin/seislive
-│       └── Events              # → $PREFIX/bin/Events (+ events)
+│       ├── Events              # → $PREFIX/bin/Events (+ events)
+│       └── quakemt             # → $PREFIX/bin/quakemt (runs the geo tool below)
 ├── docs/
 │   ├── media/                  # README images and GIFs
 │   └── tools/                  # scripts that make them (see "Regenerating the images")

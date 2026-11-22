@@ -41,6 +41,9 @@ echo "--> tplot (matplotlib plt.show() drawn in the terminal)"
 SITE="$("$VENV/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 cp "$SRC/ubuntu/tplot.py" "$SITE/tplot.py"
 
+echo "--> quakemt (focal mechanisms / moment-tensor inversion)"
+install -m 755 "$SRC/ubuntu/quakemt.py" "$VENV/bin/quakemt"
+
 echo "--> shell startup file for 'geo'"
 cp "$SRC/ubuntu/geo_rc" /root/.geo_rc
 
