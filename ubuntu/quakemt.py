@@ -43,6 +43,7 @@ from obspy.imaging.beachball import MomentTensor, aux_plane, mt2axes, mt2plane  
 UA = {"User-Agent": "SEISBOX-quakemt/1.0"}
 NETWORKS = "IU,II,G,GE,IC,CU,GT,MN"     # global broadband networks with long-period LH data
 MODEL = "prem_a_10s"                    # Syngine/AxiSEM database (18000 s long)
+VR_MIN = 35.0                           # below this the mechanism is not reported (issue #3)
 DT = 2.0                                # common sampling interval for the inversion (s)
 PAD = 600.0                             # seconds of padding before origin
 C = {"ok": "\033[32m", "warn": "\033[33m", "bad": "\033[31m", "h": "\033[1;36m", "dim": "\033[2m",
@@ -231,9 +232,10 @@ def band_for(mag):
     """Period band (s) for long-period full-waveform inversion."""
     # Tested on M6.8 Banda Sea (2026-11-21): 50-100 s gave VR 65 % and a mechanism 8-9 deg
     # from USGS/GFZ; 40-100 s only VR 52 % (more 3-D Earth effects at shorter periods).
-    # Below M6 the 50-100 s signal is too weak; use regional distances and 20-50 s.
+    # Below M6: 35-80 s at 25-90 deg was the least bad of three setups tested on
+    # M5.4-5.9 quakes (issue #3); results there are often unreliable (refused below VR_MIN).
     if mag < 6.0:
-        return 20.0, 50.0
+        return 35.0, 80.0
     return 50.0, 100.0          # Syngine DBs are accurate up to ~100 s periods
 
 
@@ -466,6 +468,11 @@ def best_lags(keys, data, g, win, sol, maxlag):
     return out
 
 
+def solve_fixed(keys, data, g, win, shifts, lags):
+    """Common shift search only; station lags fixed (taken from the catalogue depth)."""
+    return max((lsq(keys, data, g, win, sh, lags) for sh in shifts), key=lambda r: r["vr"])
+
+
 def solve(keys, data, g, win, shifts, maxlag=30.0, iters=4):
     # 1) common centroid shift, no station lags
     best = max((lsq(keys, data, g, win, sh, {}) for sh in shifts), key=lambda r: r["vr"])
@@ -494,10 +501,10 @@ def invert(ev, args, outdir):
     say("\n▶ Own inversion (about 1-3 min)")
     detail(f"  waveform inversion: periods {band[0]:.0f}-{band[1]:.0f} s, model {MODEL}")
     t_start = time.time()
-    dmin = args.dmin if args.dmin is not None else (5.0 if ev["mag"] < 6.0 else 25.0)
-    dmax = args.dmax if args.dmax is not None else (30.0 if ev["mag"] < 6.0 else 90.0)
-    # per-station lag must stay well below half the shortest period (no cycle skipping)
-    maxlag = args.maxlag if args.maxlag is not None else (30.0 if band[0] >= 50 else round(0.6 * band[0]))
+    dmin = args.dmin if args.dmin is not None else 25.0
+    dmax = args.dmax if args.dmax is not None else 90.0
+    # per-station lag must stay well below the shortest period (no cycle skipping)
+    maxlag = args.maxlag if args.maxlag is not None else (30.0 if band[0] >= 50 else 25.0)
     args.maxlag = maxlag
     bigger = preceding_quakes(ev)
     for b in bigger:
@@ -551,7 +558,8 @@ def invert(ev, args, outdir):
     results = []
     gcache = {}
     step = (depths[1] - depths[0]) if len(depths) > 1 else 10.0
-    queue = list(depths)
+    queue = sorted(depths, key=lambda d: abs(d - ev["depth"]))   # catalogue depth first
+    ref_lags = None
     while queue:
         dep = queue.pop(0)
         progress(f"Green's functions + inversion at {dep:.0f} km depth "
@@ -559,12 +567,17 @@ def invert(ev, args, outdir):
         gcache[dep] = greens(ev, stations, dep, t_end, band, n)
         use = [k for k in keys if k[0] in gcache[dep] and k[1] in gcache[dep][k[0]]
                and all(x is not None for x in gcache[dep][k[0]][k[1]])]
-        sol = solve(use, data, gcache[dep], win, shifts, maxlag=args.maxlag)
+        if args.fixed_lags and ref_lags is not None:
+            sol = solve_fixed(use, data, gcache[dep], win, shifts, ref_lags)
+        else:
+            sol = solve(use, data, gcache[dep], win, shifts, maxlag=args.maxlag)
+            ref_lags = ref_lags if ref_lags is not None else sol["lags"]
         # quality control: drop traces the model cannot fit at all, solve again
         tv = trace_vr(sol)
         good = [k for k in use if tv[k] > -20]
         if len(good) >= 8 and len(good) < len(use):
-            sol = solve(good, data, gcache[dep], win, shifts, maxlag=args.maxlag)
+            sol = (solve_fixed(good, data, gcache[dep], win, shifts, ref_lags) if args.fixed_lags
+                   else solve(good, data, gcache[dep], win, shifts, maxlag=args.maxlag))
             use = good
         sol.update(depth=dep, keys=use)
         results.append(sol)
@@ -579,8 +592,20 @@ def invert(ev, args, outdir):
             elif top == done[0] and top - step >= 5:
                 queue.append(top - step)
     best = max(results, key=lambda r: r["vr"])
+    if args.amp_scale:
+        tv = trace_vr(best)
+        pos, ratios = 0, []
+        for key, c, _, nn in best["idx"]:
+            d, sy = best["d"][pos:pos + nn], best["syn"][pos:pos + nn]
+            if tv[(key, c)] > 50 and sy @ sy > 0:
+                ratios.append((d @ sy) / (sy @ sy))   # per-trace amplitude ratio data/synthetic
+            pos += nn
+        if len(ratios) >= 6:
+            f = float(np.median(ratios))
+            detail(f"  amplitude scaling from {len(ratios)} well-fitting traces: x{f:.3f}")
+            best["m"] = [x * f for x in best["m"]]
     mw_best = mt_props(best["m"])["Mw"]
-    if best["vr"] < 20 or abs(mw_best - ev["mag"]) > 1.0:
+    if best["vr"] < VR_MIN or abs(mw_best - ev["mag"]) > 1.0:
         raise RuntimeError(f"no reliable solution (best VR {best['vr']:.0f} %, Mw {mw_best:.1f} vs "
                            f"catalogue M{ev['mag']:.1f}); data do not constrain the mechanism")
     near = [r["depth"] for r in results if r["vr"] >= best["vr"] - 2.0]   # depths fitting ~as well
@@ -767,8 +792,8 @@ def main():
     p.add_argument("--region", default="")
     p.add_argument("--invert", action="store_true", help="also run the waveform inversion")
     p.add_argument("--stations", type=int, default=24, help="max stations (default 24)")
-    p.add_argument("--dmin", type=float, default=None, help="min distance, deg (default 25; 5 below M6)")
-    p.add_argument("--dmax", type=float, default=None, help="max distance, deg (default 90; 30 below M6)")
+    p.add_argument("--dmin", type=float, default=None, help="min distance, deg (default 25)")
+    p.add_argument("--dmax", type=float, default=None, help="max distance, deg (default 90)")
     p.add_argument("--depths", default="", help="comma list of trial depths, km")
     p.add_argument("--band", default="", help="period band 'Tmin,Tmax' in s (default by magnitude)")
     p.add_argument("--maxlag", type=float, default=None,
@@ -776,6 +801,8 @@ def main():
     p.add_argument("--name", default="", help="folder name under $SEISBOX_PROJECTS/mt "
                    "(default: date_time_magnitude_region)")
     p.add_argument("--outdir", default="", help="full output folder path (overrides --name)")
+    p.add_argument("--fixed-lags", action="store_true", help=argparse.SUPPRESS)   # experiment, issue #1
+    p.add_argument("--amp-scale", action="store_true", help=argparse.SUPPRESS)    # experiment, issue #2
     p.add_argument("--no-terminal-plot", action="store_true", help=argparse.SUPPRESS)  # kept for old calls
     a = p.parse_args()
 
