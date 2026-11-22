@@ -2,5 +2,6 @@ __pycache__/
 *.pyc
 output/
 *.mseed
-*.png
+projects/**/*.png
+docs/media/*.json
 .DS_Store
