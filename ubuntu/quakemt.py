@@ -231,8 +231,9 @@ def band_for(mag):
     """Period band (s) for long-period full-waveform inversion."""
     # Tested on M6.8 Banda Sea (2026-11-21): 50-100 s gave VR 65 % and a mechanism 8-9 deg
     # from USGS/GFZ; 40-100 s only VR 52 % (more 3-D Earth effects at shorter periods).
+    # Below M6 the 50-100 s signal is too weak; use regional distances and 20-50 s.
     if mag < 6.0:
-        return 40.0, 90.0
+        return 20.0, 50.0
     return 50.0, 100.0          # Syngine DBs are accurate up to ~100 s periods
 
 
@@ -287,16 +288,39 @@ def filt(x, band):
     return bandpass(x, 1 / band[1], 1 / band[0], 1 / DT, corners=4, zerophase=True)
 
 
+LOC_ORDER = ("00", "10", "", "20", "60", "01")
+
+
+def pick_location(st, net, sta):
+    """First location code whose returned data has Z plus two horizontals."""
+    comps = {}
+    for tr in st.select(network=net, station=sta):
+        comps.setdefault(tr.stats.location, set()).add(tr.stats.channel[-1])
+    for loc in LOC_ORDER + tuple(sorted(comps)):
+        c = comps.get(loc, set())
+        if "Z" in c and ({"N", "E"} <= c or {"1", "2"} <= c):
+            return loc, comps
+    return None, comps
+
+
 def download_data(ev, stations, t_end, band, n):
     from obspy.clients.fdsn import RoutingClient
     t0 = ev["time"]
     rc = RoutingClient("iris-federator")
-    bulk = [(s["net"], s["sta"], s["loc"], "LH?", t0 - PAD - 300, t0 + t_end + 300) for s in stations]
+    # all location codes: some stations only have data at a second sensor (e.g. II.NIL 10)
+    bulk = [(s["net"], s["sta"], "*", "LH?", t0 - PAD - 300, t0 + t_end + 300) for s in stations]
     st = rc.get_waveforms_bulk(bulk)
     inv = rc.get_stations_bulk(bulk, level="response")
     data = {}
     for s in stations:
-        sub = st.select(network=s["net"], station=s["sta"], location=s["loc"]).copy()
+        loc, comps = pick_location(st, s["net"], s["sta"])
+        if loc is None:
+            got = ", ".join(f"{l or '--'}:{''.join(sorted(c))}" for l, c in comps.items())
+            detail(f"    skip {s['net']}.{s['sta']}: "
+                   + (f"incomplete components ({got})" if comps else "no data returned (metadata only)"))
+            continue
+        s["loc"] = loc
+        sub = st.select(network=s["net"], station=s["sta"], location=loc).copy()
         try:
             gaps = sub.get_gaps()
             if sum(gp[6] for gp in gaps) > 30:            # more than 30 s missing in total
@@ -317,8 +341,23 @@ def download_data(ev, stations, t_end, band, n):
             data[f"{s['net']}.{s['sta']}"] = {c: filt(to_grid(sub.select(component=c)[0], t0, n), band)
                                                for c in "ZRT"}
         except Exception as e:
-            detail(f"    skip {s['net']}.{s['sta']}: {str(e)[:70] or e.__class__.__name__}")
+            detail(f"    skip {s['net']}.{s['sta']}.{loc or '--'}: {str(e)[:70] or e.__class__.__name__}")
     return data
+
+
+def thin_by_azimuth(stations, nmax):
+    """Keep at most nmax stations, spread evenly in azimuth."""
+    if len(stations) <= nmax:
+        return stations
+    sectors = {}
+    for s in sorted(stations, key=lambda c: abs(c["dist"] - 60)):
+        sectors.setdefault(int(s["az"] // (360 / nmax)), []).append(s)
+    out = []
+    while len(out) < nmax:
+        for k in sorted(sectors):
+            if sectors[k] and len(out) < nmax:
+                out.append(sectors[k].pop(0))
+    return out
 
 
 ELEMENTS = ("Mrr", "Mtt", "Mpp", "Mrt", "Mrp", "Mtp")
@@ -455,10 +494,16 @@ def invert(ev, args, outdir):
     say("\n▶ Own inversion (about 1-3 min)")
     detail(f"  waveform inversion: periods {band[0]:.0f}-{band[1]:.0f} s, model {MODEL}")
     t_start = time.time()
-    dmin = args.dmin if args.dmin is not None else (12.0 if ev["mag"] < 6.0 else 25.0)
-    dmax = args.dmax if args.dmax is not None else (60.0 if ev["mag"] < 6.0 else 90.0)
-    # ask for ~40 % more stations: some always lack a component or have gaps
-    stations, ncand = select_stations(ev, int(args.stations * 1.4), dmin, dmax)
+    dmin = args.dmin if args.dmin is not None else (5.0 if ev["mag"] < 6.0 else 25.0)
+    dmax = args.dmax if args.dmax is not None else (30.0 if ev["mag"] < 6.0 else 90.0)
+    # per-station lag must stay well below half the shortest period (no cycle skipping)
+    maxlag = args.maxlag if args.maxlag is not None else (30.0 if band[0] >= 50 else round(0.6 * band[0]))
+    args.maxlag = maxlag
+    bigger = preceding_quakes(ev)
+    for b in bigger:
+        detail(f"  warning: M{b[1]:.1f} {b[2]} {b[0]:.0f} min before; its surface waves may mask this quake")
+    # ask for 2x the stations: some return no data (metadata only) or incomplete components
+    stations, ncand = select_stations(ev, int(args.stations * 2), dmin, dmax)
     if len(stations) < 6:
         raise RuntimeError(f"only {len(stations)} usable stations at {dmin:.0f}-{dmax:.0f}°")
     gap = azimuthal_gap([s["az"] for s in stations])
@@ -468,8 +513,11 @@ def invert(ev, args, outdir):
     n = int((t_end + PAD) / DT)
     progress(f"downloading waveforms from {len(stations)} stations…")
     data = download_data(ev, stations, t_end, band, n)
-    stations = [s for s in stations if f"{s['net']}.{s['sta']}" in data]
-    detail(f"  usable 3-component records: {len(stations)}")
+    usable = [s for s in stations if f"{s['net']}.{s['sta']}" in data]
+    stations = thin_by_azimuth(usable, int(args.stations * 1.25))
+    data = {k: v for k, v in data.items() if any(f"{s['net']}.{s['sta']}" == k for s in stations)}
+    gap = azimuthal_gap([s["az"] for s in stations])
+    detail(f"  usable 3-component records: {len(usable)}, kept {len(stations)} (azimuthal gap {gap:.0f}°)")
     if len(stations) < 6:
         raise RuntimeError("too few usable records")
     win = windows(ev, stations, n)
@@ -489,9 +537,10 @@ def invert(ev, args, outdir):
     nsta_clear = len({k for k, _ in keys})
     detail(f"  traces with clear signal (SNR > 3): {len(keys)} from {nsta_clear} stations")
     if len(keys) < 8 or nsta_clear < 4:
-        raise RuntimeError("too few records with a clear long-period signal "
-                           f"({len(keys)} traces). The quake may be too small, or masked by a "
-                           "larger quake's surface waves shortly before it.")
+        why = (f" A bigger quake (M{bigger[0][1]:.1f} {bigger[0][2]}) happened {bigger[0][0]:.0f} min "
+               "before; its surface waves are probably masking this one." if bigger else
+               " The quake may be too small for this method.")
+        raise RuntimeError(f"too few records with a clear signal ({len(keys)} traces).{why}")
     if args.depths:
         depths = [float(x) for x in args.depths.split(",")]
     else:
@@ -543,6 +592,20 @@ def invert(ev, args, outdir):
     progress("")
     plot_fits(ev, best, stations, win, outdir, band)
     return props
+
+
+def preceding_quakes(ev, hours=3.0):
+    """Larger quakes (M >= mag+0.5, at least M6) in the hours before: their long-period
+    surface waves can still dominate the records. Returns [(minutes before, M, place)]."""
+    q = dict(format="geojson", starttime=(ev["time"] - hours * 3600).isoformat(),
+             endtime=(ev["time"] - 60).isoformat(), minmagnitude=max(6.0, ev["mag"] + 0.5))
+    try:
+        feats = json.loads(http("https://earthquake.usgs.gov/fdsnws/event/1/query?" +
+                                urllib.parse.urlencode(q)))["features"]
+    except Exception:
+        return []
+    return [((ev["time"].timestamp - f["properties"]["time"] / 1000) / 60, f["properties"]["mag"],
+             f["properties"]["place"]) for f in feats]
 
 
 def azimuthal_gap(az):
@@ -704,11 +767,12 @@ def main():
     p.add_argument("--region", default="")
     p.add_argument("--invert", action="store_true", help="also run the waveform inversion")
     p.add_argument("--stations", type=int, default=24, help="max stations (default 24)")
-    p.add_argument("--dmin", type=float, default=None, help="min distance, deg (default 25; 12 below M6)")
-    p.add_argument("--dmax", type=float, default=None, help="max distance, deg (default 90; 60 below M6)")
+    p.add_argument("--dmin", type=float, default=None, help="min distance, deg (default 25; 5 below M6)")
+    p.add_argument("--dmax", type=float, default=None, help="max distance, deg (default 90; 30 below M6)")
     p.add_argument("--depths", default="", help="comma list of trial depths, km")
     p.add_argument("--band", default="", help="period band 'Tmin,Tmax' in s (default by magnitude)")
-    p.add_argument("--maxlag", type=float, default=30.0, help="max per-station time lag, s (default 30)")
+    p.add_argument("--maxlag", type=float, default=None,
+                   help="max per-station time lag, s (default 30 for M6+, 0.6 x shortest period below)")
     p.add_argument("--name", default="", help="folder name under $SEISBOX_PROJECTS/mt "
                    "(default: date_time_magnitude_region)")
     p.add_argument("--outdir", default="", help="full output folder path (overrides --name)")
