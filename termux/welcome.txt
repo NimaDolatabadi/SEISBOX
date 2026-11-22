@@ -1,9 +1,9 @@
 
-[1;36m  ___ ___ ___ ___ ___  _____  __[0m
-[1;36m / __| __|_ _/ __| _ )/ _ \ \/ /[0m
-[1;36m \__ \ _| | |\__ \ _ \ (_) >  < [0m
-[1;36m |___/___|___|___/___/\___/_/\_\[0m
-[1;33m   Python seismology on Android[0m
+[1;36m  ___ ___ ___ ___ ___  _____  __[0m
+[1;36m / __| __|_ _/ __| _ )/ _ \ \/ /[0m
+[1;36m \__ \ _| | |\__ \ _ \ (_) >  < [0m
+[1;36m |___/___|___|___/___/\___/_/\_\[0m
+[1;33m   Python seismology on Android[0m
 
  ── Commands ─────────────────────────────────
  geo        Ubuntu shell + Python 3.12 venv
@@ -15,7 +15,7 @@
  Events     latest earthquakes worldwide
             filter: source, region, magnitude
             Events -m 5 -c japan
-            (in it: l = live refresh, r = reload)
+            in it: l = live, r = reload
  seislive   live seismograms (Termux:X11)
             seislive IU.ANMO.00.BHZ
               --minutes 10 --filter 0.5 5
@@ -25,7 +25,7 @@
 
  Inside geo:
    python x.py    run a script
-   import tplot   -> plt.show() draws in terminal
+   import tplot  plt.show() in terminal
    exit           back to Termux
 
  welcome    show this screen again

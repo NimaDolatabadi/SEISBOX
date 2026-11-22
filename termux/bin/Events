@@ -490,6 +490,34 @@ class App:
         except FileNotFoundError:
             self.msg = e.url
 
+    ESCAPES = {"[A": curses.KEY_UP, "OA": curses.KEY_UP, "[B": curses.KEY_DOWN,
+               "OB": curses.KEY_DOWN, "[5~": curses.KEY_PPAGE, "[6~": curses.KEY_NPAGE,
+               "[H": curses.KEY_HOME, "OH": curses.KEY_HOME, "[1~": curses.KEY_HOME,
+               "[F": curses.KEY_END, "OF": curses.KEY_END, "[4~": curses.KEY_END}
+
+    def read_escape(self):
+        """Arrow keys arrive as Esc + '[B' or Esc + 'OB'. Curses decodes only the
+        form its terminfo lists, so decode both; a lone Esc means quit."""
+        self.scr.nodelay(True)
+        seq = ""
+        try:
+            while len(seq) < 6:
+                c = self.scr.getch()
+                if c == -1:
+                    time.sleep(0.03)            # rest of the sequence may lag a bit
+                    c = self.scr.getch()
+                    if c == -1:
+                        break
+                seq += chr(c)
+                if seq in self.ESCAPES or (len(seq) > 1 and seq[-1].isalpha() or seq[-1] == "~"):
+                    break
+        finally:
+            self.scr.nodelay(False)
+            self.scr.timeout(500)
+        if not seq:
+            return ord("q")
+        return self.ESCAPES.get(seq)            # unknown sequence: ignored (None)
+
     def run(self):
         self.refresh_data()
         while True:
@@ -503,6 +531,10 @@ class App:
                 if time.time() - self.last_refresh > (self.live_sec if self.live else REFRESH_SEC):
                     self.refresh_data()
                 continue
+            if k == 27:                         # Esc alone quits; Esc+[… is a key code
+                k = self.read_escape()
+                if k is None:
+                    continue
             self.msg = ""
             n = len(self.view)
             h = self.scr.getmaxyx()[0]

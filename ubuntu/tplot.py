@@ -11,7 +11,7 @@ def tshow(fig=None, size=None, *a, **k):
     fd, f = tempfile.mkstemp(suffix=".png"); os.close(fd)
     try:
         (fig or plt.gcf()).savefig(f, dpi=120, bbox_inches="tight")
-        subprocess.run(["chafa", "--symbols", "all", "-s", size, f])
+        subprocess.run(["chafa", "--symbols", "block+border+space", "-s", size, f])  # glyphs every terminal font has
     finally:
         os.remove(f)
     plt.close(fig or plt.gcf())

@@ -7,6 +7,16 @@ ObsPy, Pyrocko, OpenQuake Engine, MSNoise, PyGMT (with GMT 6.5), GeoPandas, hvsr
 pandas, numba and more. You also get plots in the terminal, real plot windows through
 Termux:X11, and a live seismogram viewer.
 
+<p align="center">
+  <img src="docs/media/events.gif" width="440" alt="Events: live list of the latest earthquakes worldwide">
+  &nbsp;
+  <img src="docs/media/welcome.png" width="300" alt="SEISBOX welcome screen in Termux">
+</p>
+
+<p align="center">
+  <img src="docs/media/seismogram.gif" width="600" alt="Animated seismograms of the M6.8 Banda Sea earthquake, 21 Nov 2026">
+</p>
+
 ```
 geo                 # enter the Python environment
 python my_script.py # use obspy, pygmt, openquake ... as on a PC
@@ -274,6 +284,8 @@ st.plot(show=False); plt.show()          # drawn right in the terminal
 
 There are three ways to see plots:
 
+<p align="center"><img src="docs/media/tplot.png" width="620" alt="A real seismogram drawn inside the terminal with tplot"></p>
+
 1. **In the terminal (`tplot`)**: add `import tplot` at the top of a script. After that,
    `plt.show()` renders the figure with `chafa` as colored characters. Use
    `plt.show(size="80x25")` to choose the size. Try `python /sdcard/termux/projects/tplot_demo.py`.
@@ -285,6 +297,15 @@ There are three ways to see plots:
    PyGMT: `fig.savefig("/sdcard/.../map.png")`.
 
 `plotext` (5.3.2) is also installed for pure-text line plots.
+
+PyGMT and GMT 6.5 work fully inside `geo`. This map of the last 30 days of M4.5+ quakes is made on the
+phone by [`docs/tools/make_map.py`](docs/tools/make_map.py):
+
+<p align="center"><img src="docs/media/quakes-map.png" width="700" alt="PyGMT world map of M4.5+ earthquakes, last 30 days"></p>
+
+The animated seismograms at the top come from [`docs/tools/make_seismogram.py`](docs/tools/make_seismogram.py).
+It downloads the M6.8 Banda Sea earthquake (21 Nov 2026) from five stations 8°–124° away via
+ObsPy, and marks the TauP P and S arrival times.
 
 ---
 
@@ -330,6 +351,8 @@ Events --live                  # start in live mode (30 s); Events --live 15 for
 | `r` | reload now (it also refreshes itself every 5 minutes) |
 | `l` | **live mode** on/off: reloads every 30 s with a countdown in the header. Quakes that arrive while you watch get a green `●` for 10 minutes, and the phone beeps |
 | `?` / `q` | help / quit |
+
+<p align="center"><img src="docs/media/events-details.png" width="440" alt="Events details popup with ObsPy waveform snippet"></p>
 
 Magnitudes are coloured: yellow ≥ 4, red ≥ 5, inverted red ≥ 6. Each service returns at most
 1000 events. With a low magnitude and a long window, the bottom bar warns that older events are
@@ -397,6 +420,9 @@ SEISBOX/
 │   └── bin/
 │       ├── seislive            # → $PREFIX/bin/seislive
 │       └── Events              # → $PREFIX/bin/Events (+ events)
+├── docs/
+│   ├── media/                  # README images and GIFs
+│   └── tools/                  # scripts that make them (see "Regenerating the images")
 ├── examples/tplot_demo.py
 └── projects/
     ├── seis_live/seis_live.py
@@ -469,6 +495,28 @@ proot-distro remove ubuntu
 rm -f $PREFIX/bin/seislive ~/.seisbox.bashrc ~/.termux_welcome ~/.hushlogin
 sed -i '/seisbox.bashrc/d' ~/.bashrc
 ```
+
+### Regenerating the images
+
+All README media are made on the phone from real data. Ubuntu can't see the Termux home
+folder by default, so the repo is bound into it as `/opt/seisbox`:
+
+```bash
+cd ~/SEISBOX
+G="proot-distro login ubuntu --bind $HOME/SEISBOX:/opt/seisbox -- bash -c"
+
+# PyGMT map and animated seismograms (geo Python)
+$G 'cd /opt/seisbox && /root/geo/bin/python docs/tools/make_map.py'
+$G 'cd /opt/seisbox && /root/geo/bin/python docs/tools/make_seismogram.py'
+
+# terminal screenshots: record in Termux (needs: pip install pyte), draw in geo (Pillow)
+python docs/tools/term_capture.py events docs/media/events.json
+$G 'cd /opt/seisbox && /root/geo/bin/python docs/tools/term_render.py docs/media/events.json docs/media/events.gif --title "Termux — Events"'
+rm docs/media/events.json
+```
+
+The same works for `welcome` and `tplot` (`term_capture.py welcome|tplot`). Use `--frame N` to save
+one frame as PNG.
 
 ---
 
