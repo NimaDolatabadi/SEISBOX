@@ -42,11 +42,16 @@ SESSIONS = {
         (b"?", 0.8, 3200),
         (b"x", 0.3, None), (b"q", 0.5, None),
     ]),
+    "plotext": (["bash", "-c",
+                 "printf '\\033[32m~/projects $\\033[0m python quake_plotext.py\\n'; "
+                 f"proot-distro login ubuntu --bind {REPO}:/opt/seisbox -- "
+                 "env TERM=xterm-256color PYTHONWARNINGS=ignore /root/geo/bin/python "
+                 "/opt/seisbox/docs/tools/quake_plotext.py"], 120, 40, [(b"", 45.0, 1000)]),
     "welcome": (["bash", "-c", f"cat {REPO}/termux/welcome.txt"], 50, 36, [(b"", 1.0, 1000)]),
     "tplot": (["bash", "-c",
                "printf '\\033[32m~/projects $\\033[0m python quake_tplot.py\\n'; "
                f"proot-distro login ubuntu --bind {REPO}:/opt/seisbox -- "
-               "env TERM=xterm-256color PYTHONWARNINGS=ignore /root/geo/bin/python "
+               "env TERM=xterm-256color PYTHONWARNINGS=ignore ${TPLOT_SYMBOLS:+TPLOT_SYMBOLS=$TPLOT_SYMBOLS} ${TPLOT_ARGS:+TPLOT_ARGS=\"$TPLOT_ARGS\"} /root/geo/bin/python "
                "/opt/seisbox/docs/tools/quake_tplot.py"], 120, 40, [(b"", 45.0, 1000)]),
 }
 

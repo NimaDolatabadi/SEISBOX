@@ -287,16 +287,22 @@ There are three ways to see plots:
 <p align="center"><img src="docs/media/tplot.png" width="620" alt="A real seismogram drawn inside the terminal with tplot"></p>
 
 1. **In the terminal (`tplot`)**: add `import tplot` at the top of a script. After that,
-   `plt.show()` renders the figure with `chafa` as colored characters. Use
-   `plt.show(size="80x25")` to choose the size. Try `python /sdcard/termux/projects/tplot_demo.py`.
-   Zoom out in Termux (pinch) for more detail.
+   `plt.show()` draws any matplotlib figure in the terminal with `chafa`, using braille dots
+   (2×4 per character, so lines stay sharp). Use `plt.show(size="120x35")` to choose the size,
+   and zoom out in Termux (pinch) for more detail. Try `python /sdcard/termux/projects/tplot_demo.py`.
+   If your font shows boxes instead of dots, switch to the older filled-block look:
+   `export TPLOT_SYMBOLS=block+border+space TPLOT_ARGS=" "`.
 2. **Real windows (`ubx`)**: open the Termux:X11 app once, then run `ubx` in Termux. Matplotlib
    uses TkAgg, and windows appear in Termux:X11 with zoom and pan. Switch back to Termux with
    the Android app switcher.
 3. **Files**: `plt.savefig("/sdcard/termux/projects/fig.png", dpi=200)` and open it in the gallery.
    PyGMT: `fig.savefig("/sdcard/.../map.png")`.
 
-`plotext` (5.3.2) is also installed for pure-text line plots.
+**`plotext`** (5.3.2, also installed) draws line plots natively in the terminal. The axes, ticks and
+labels are real characters, so text is sharper than with `tplot`, but it only does simple plot
+types. The same seismogram ([`docs/tools/quake_plotext.py`](docs/tools/quake_plotext.py)):
+
+<p align="center"><img src="docs/media/plotext.png" width="620" alt="The same seismogram drawn with plotext"></p>
 
 PyGMT and GMT 6.5 work fully inside `geo`. This map of the last 30 days of M4.5+ quakes is made on the
 phone by [`docs/tools/make_map.py`](docs/tools/make_map.py):

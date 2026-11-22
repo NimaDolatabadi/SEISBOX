@@ -34,6 +34,21 @@ def color(c, default):
         return default
 
 
+BRAILLE_DOTS = [(0x01, 0, 0), (0x02, 0, 1), (0x04, 0, 2), (0x40, 0, 3),
+                (0x08, 1, 0), (0x10, 1, 1), (0x20, 1, 2), (0x80, 1, 3)]
+
+
+def draw_braille(d, ch, px, py, cw, chh, fill):
+    """DejaVu Sans Mono has no braille glyphs: draw the 2x4 dots like a terminal font would."""
+    bits = ord(ch) - 0x2800
+    r = max(1.2, cw * 0.16)
+    for bit, cx, cy in BRAILLE_DOTS:
+        if bits & bit:
+            x = px + cw * (0.3 + 0.4 * cx)
+            y = py + chh * (0.14 + 0.24 * cy)
+            d.ellipse([x - r, y - r, x + r, y + r], fill=fill)
+
+
 def render(frame, cols, rows, title, fonts):
     reg, bold = fonts
     cw = round(reg.getlength("M"))
@@ -57,7 +72,9 @@ def render(frame, cols, rows, title, fonts):
             px, py = pad + x * cw, bar + pad + y * ch
             if b != BG:
                 d.rectangle([px, py, px + cw - 1, py + ch - 1], fill=b)
-            if txt.strip():
+            if txt and 0x2800 < ord(txt[0]) <= 0x28FF:
+                draw_braille(d, txt[0], px, py, cw, ch, f)
+            elif txt.strip():
                 d.text((px, py + (ch - SIZE) / 2 - 1), txt, font=bold if isbold else reg, fill=f)
     return img
 
