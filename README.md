@@ -472,9 +472,12 @@ mkdir -p /sdcard/termux/projects/noise && cd /sdcard/termux/projects/noise
 msnoise db init                          # choose 1 (sqlite), then accept defaults
 msnoise config set data_folder=/sdcard/termux/projects/noise/SDS
 msnoise config set data_structure=SDS
-msnoise config set startdate=2026-11-10 enddate=2026-11-12
-msnoise config set ref_begin=2026-11-10 ref_end=2026-11-12   # ← must overlap your data!
-msnoise config set components_to_compute=ZZ mov_stack=2
+msnoise config set startdate=2026-11-10   # one setting per command
+msnoise config set enddate=2026-11-12
+msnoise config set ref_begin=2026-11-10   # ← reference period must overlap your data!
+msnoise config set ref_end=2026-11-12
+msnoise config set components_to_compute=ZZ
+msnoise config set mov_stack=2
 msnoise populate                         # station table from the archive
 python -c "from msnoise.api import *; db=connect(); \
   update_station(db,'IU','ANMO',-106.4572,34.9459,1850,coordinates='DEG'); \
