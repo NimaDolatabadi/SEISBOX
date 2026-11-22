@@ -41,6 +41,14 @@ echo "--> tplot (matplotlib plt.show() drawn in the terminal)"
 SITE="$("$VENV/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 cp "$SRC/ubuntu/tplot.py" "$SITE/tplot.py"
 
+echo "--> MSNoise: SQLAlchemy 2 compatibility shim"
+if "$VENV/bin/python" -c "import msnoise" 2>/dev/null; then
+  MSN="$SITE/msnoise"
+  cp "$SRC/ubuntu/msnoise_sa2_compat.py" "$MSN/_sa2_compat.py"
+  grep -q "_sa2_compat" "$MSN/__init__.py" || \
+    sed -i '1i from . import _sa2_compat  # noqa: F401  (SEISBOX: SQLAlchemy 2 support)' "$MSN/__init__.py"
+fi
+
 echo "--> quakemt (focal mechanisms / moment-tensor inversion)"
 install -m 755 "$SRC/ubuntu/quakemt.py" "$VENV/bin/quakemt"
 install -m 755 "$SRC/ubuntu/imgview.py" "$VENV/bin/imgview"   # used by seisview

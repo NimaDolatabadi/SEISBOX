@@ -460,21 +460,43 @@ python irsc_tui.py            # full-screen form (curses)
 
 ### MSNoise: ambient-noise monitoring (dv/v)
 
-MSNoise 1.6.5 is installed with a SQLite database backend (no MySQL server needed). Each project
-is a folder holding its `db.ini` and database:
+MSNoise 1.6.5 is installed with a SQLite database backend (no MySQL server needed). MSNoise 1.6.5
+was written for SQLAlchemy 1.x. SEISBOX adds a small compatibility layer
+([`ubuntu/msnoise_sa2_compat.py`](ubuntu/msnoise_sa2_compat.py), loaded only by MSNoise) so it runs
+with the SQLAlchemy 2 that pandas 3 and ObsPy need. Each project is a folder holding its `db.ini`
+and database. A complete run, tested with three days of IU.ANMO and IU.TUC data:
 
 ```bash
 geo
 mkdir -p /sdcard/termux/projects/noise && cd /sdcard/termux/projects/noise
-msnoise db init                 # choose 1 (sqlite), then accept defaults
+msnoise db init                          # choose 1 (sqlite), then accept defaults
 msnoise config set data_folder=/sdcard/termux/projects/noise/SDS
 msnoise config set data_structure=SDS
-msnoise populate                # fill the station table from the archive
+msnoise config set startdate=2026-11-10 enddate=2026-11-12
+msnoise config set ref_begin=2026-11-10 ref_end=2026-11-12   # ← must overlap your data!
+msnoise config set components_to_compute=ZZ mov_stack=2
+msnoise populate                         # station table from the archive
+python -c "from msnoise.api import *; db=connect(); \
+  update_station(db,'IU','ANMO',-106.4572,34.9459,1850,coordinates='DEG'); \
+  update_station(db,'IU','TUC',-110.7847,32.3098,906,coordinates='DEG'); \
+  update_filter(db,1,0.1,0.1,1.0,1.0,0.0,10.0,5.0,True)"     # X=longitude, Y=latitude; filter 0.1-1 Hz
 msnoise scan_archive --init
 msnoise new_jobs --init
-msnoise compute_cc              # cross-correlations
-msnoise info                    # status of config and jobs
+msnoise compute_cc                       # cross-correlations
+msnoise stack -r                         # reference stack
+msnoise reset STACK
+msnoise stack -m                         # moving stacks
+msnoise compute_mwcs                     # moving-window cross-spectral analysis
+msnoise compute_dtt                      # dt/t (= -dv/v), results in DTT/
+msnoise info -j                          # job status
 ```
+
+Common pitfalls:
+- **`ref_begin`/`ref_end`** default to 1970–2021. If they don't overlap your data, no reference
+  stack is made, and MWCS/DTT finish "successfully" without writing anything.
+- **No filter defined** gives `NO FILTERS DEFINED, exiting` in `compute_cc`. Add one with
+  `update_filter` (above) or in `msnoise admin`.
+- `update_station(..., X, Y, ...)` takes **longitude first**.
 
 `msnoise admin` starts the web configuration page. Open the printed `http://localhost:5000`
 address in your phone's browser.
