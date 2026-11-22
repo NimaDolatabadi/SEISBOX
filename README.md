@@ -357,7 +357,7 @@ Events --live                  # start in live mode (30 s); Events --live 15 for
 | `d` | time window: 1 → 3 → 7 → 30 days |
 | `r` | reload now (it also refreshes itself every 5 minutes) |
 | `f` | **focal mechanism**: published USGS/GFZ moment tensors of the selected quake (see below) |
-| `l` | **live mode** on/off: reloads every 30 s with a countdown in the header. Quakes that arrive while you watch get a green `●` for 10 minutes, and the phone beeps |
+| `l` | **live mode** on/off: reloads every 30 s with a countdown in the header. Quakes that arrive while you watch get a green `●` for 10 minutes and an **Android notification** (via Termux:API, with vibration; turn off with `--no-notify`). The terminal also beeps, if Termux's bell is enabled |
 | `?` / `q` | help / quit |
 
 <p align="center"><img src="docs/media/events-details.png" width="440" alt="Events details popup with ObsPy waveform snippet"></p>

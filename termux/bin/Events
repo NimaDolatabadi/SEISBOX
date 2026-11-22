@@ -31,6 +31,7 @@ import argparse
 import curses
 import math
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -68,7 +69,8 @@ r       reload now (auto every 5 min)
 f       focal mechanism (USGS/GFZ published)
 i (or F) + own moment-tensor inversion (M5.5+)
 l       LIVE mode on/off: reload every 30 s,
-          new quakes get a green ● and a beep
+          new quakes: green ●, beep, and an
+          Android notification (Termux:API)
 q       quit
 
 Mag colours: yellow ≥4  red ≥5  inverted ≥6
@@ -363,6 +365,26 @@ def matches(ev, country, minmag):
     return False
 
 
+def notify_android(new_evs):
+    """Live mode: Android notification (Termux:API) for new quakes, with vibration.
+    The terminal bell alone is often silent on phones (issue #9)."""
+    if not new_evs or not shutil.which("termux-notification"):
+        return False
+    new_evs = sorted(new_evs, key=lambda e: -(0 if math.isnan(e.mag) else e.mag))
+    top = new_evs[0]
+    title = (f"M{top.mag:.1f} {top.region}" if len(new_evs) == 1 else
+             f"{len(new_evs)} new quakes, largest M{top.mag:.1f} {top.region}")
+    lines = [f"M{e.mag:.1f}  {e.time:%H:%M} UTC  {e.region}" for e in new_evs[:5]]
+    try:
+        subprocess.Popen(["termux-notification", "--id", "seisbox-events", "--title", title,
+                          "--content", "\n".join(lines), "--priority", "high",
+                          "--vibrate", "250,150,250", "--group", "seisbox"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except OSError:
+        return False
+
+
 def safe_name(text):
     """Folder-safe ASCII name (same rule as quakemt)."""
     import re
@@ -418,6 +440,7 @@ class App:
         self.seen = {}            # (source, id) -> time first seen (0 = was there at start)
         self.baseline = True      # first load after start / filter change: nothing is "new"
         self.beep = False
+        self.notify = not args.no_notify
         self.gen = 0              # bumps on every reload; stale downloads are discarded
         self.by_src = {}          # newest result per source, kept while others still load
         curses.curs_set(0)
@@ -470,7 +493,7 @@ class App:
 
     def update_events(self, names):
         evs = merge([self.by_src[n] for n in names if n in self.by_src])
-        now, fresh = time.time(), 0
+        now, fresh, new_evs = time.time(), 0, []
         for e in evs:
             known = [self.seen[k] for k in e.keys if k in self.seen]
             if known:                       # same quake, maybe more agencies now
@@ -479,11 +502,14 @@ class App:
                 t = 0.0 if self.baseline else now
                 if t and matches(e, self.country, self.minmag):
                     fresh += 1
+                    new_evs.append(e)
             for k in e.keys:
                 self.seen.setdefault(k, t)
         if fresh:
             self.msg = f"● {fresh} new quake{'s' if fresh > 1 else ''}"
             self.beep = self.live
+            if self.live and self.notify:
+                notify_android(new_evs)
         self.events = evs
         self.apply_filter()
 
@@ -816,6 +842,8 @@ def main():
     p.add_argument("--country", "-c", default="", help="country/region text, comma = OR")
     p.add_argument("--days", "-d", type=int, default=3, help="time window in days (default 3)")
     p.add_argument("--list", "-l", action="store_true", help="print a table instead of the TUI")
+    p.add_argument("--no-notify", action="store_true",
+                   help="live mode: no Android notification for new quakes (Termux:API)")
     p.add_argument("--live", nargs="?", type=int, const=LIVE_SEC, metavar="SEC",
                    help=f"start in live mode, reload every SEC seconds (default {LIVE_SEC})")
     args = p.parse_args()
