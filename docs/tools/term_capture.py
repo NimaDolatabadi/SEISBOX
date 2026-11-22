@@ -47,7 +47,7 @@ SESSIONS = {
                "printf '\\033[32m~/projects $\\033[0m python quake_tplot.py\\n'; "
                f"proot-distro login ubuntu --bind {REPO}:/opt/seisbox -- "
                "env TERM=xterm-256color PYTHONWARNINGS=ignore /root/geo/bin/python "
-               "/opt/seisbox/docs/tools/quake_tplot.py"], 84, 30, [(b"", 45.0, 1000)]),
+               "/opt/seisbox/docs/tools/quake_tplot.py"], 120, 40, [(b"", 45.0, 1000)]),
 }
 
 

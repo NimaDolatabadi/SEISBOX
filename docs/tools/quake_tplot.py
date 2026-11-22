@@ -15,12 +15,14 @@ st.detrend("demean").filter("bandpass", freqmin=0.02, freqmax=1.0)
 tr = st[0]
 print(f"{tr.id}  {tr.stats.starttime.strftime('%Y-%m-%d %H:%M:%S')}  {tr.stats.npts} samples @ {tr.stats.sampling_rate:g} Hz")
 
-fig, ax = plt.subplots(figsize=(10, 4), facecolor="#0d1117")
+plt.rcParams.update({"font.size": 15, "font.weight": "bold"})   # large text survives the character grid
+fig, ax = plt.subplots(figsize=(10, 4.2), facecolor="#0d1117")
 ax.set_facecolor("#0d1117")
-ax.plot(tr.times() / 60, tr.data, color="#4fc3f7", lw=1.0)
-ax.set_title("M6.8 Banda Sea · IU.CTAO (22°) · BHZ 0.02–1 Hz", color="white")
+ax.plot(tr.times() / 60, tr.data * 1e-3, color="#4fc3f7", lw=1.0)   # counts -> x1000
+ax.set_title("M6.8 Banda Sea  ·  IU.CTAO 22°", color="white")
 ax.set_xlabel("minutes after origin", color="white")
+ax.set_yticks([])
 ax.tick_params(colors="white")
 for s in ax.spines.values():
     s.set_color("#30363d")
-plt.show(size="82x24")
+plt.show(size="118x34")
