@@ -1,0 +1,480 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""Events — latest earthquakes worldwide in a terminal UI.
+
+Sources (FDSN event web services, no API key needed):
+  USGS  earthquake.usgs.gov        (NEIC / ComCat)
+  EMSC  www.seismicportal.eu       (European-Mediterranean Seismological Centre)
+  GFZ   geofon.gfz-potsdam.de      (GEOFON, Potsdam)
+  All   all three merged; duplicates of the same quake are shown once
+
+Usage:
+  Events                                  interactive TUI
+  Events --mag 5 --country japan          start with filters
+  Events --source emsc --days 3
+  Events --list --mag 4.5 --country iran  plain table (no TUI), e.g. for scripts
+
+Keys (TUI):
+  Up/Down PgUp/PgDn Home/End  move        Enter  details of selected quake
+  s  source (All/USGS/EMSC/GFZ)           m  minimum magnitude
+  c  country/region text filter           d  time window (1/3/7/30 days)
+  r  refresh now                          o  open selected quake's web page
+  ?  help                                 q  quit
+Auto-refreshes every 5 minutes.
+
+Uses only the Python standard library (runs on Termux's own python).
+"""
+import argparse
+import curses
+import math
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+
+SOURCES = {
+    "USGS": "https://earthquake.usgs.gov/fdsnws/event/1/query",
+    "EMSC": "https://www.seismicportal.eu/fdsnws/event/1/query",
+    "GFZ":  "https://geofon.gfz-potsdam.de/fdsnws/event/1/query",
+}
+SOURCE_CYCLE = ["All", "USGS", "EMSC", "GFZ"]
+DAYS_CYCLE = [1, 3, 7, 30]
+REFRESH_SEC = 300
+HELP = """EVENTS — keys
+↑ ↓  PgUp PgDn  Home End   move
+Enter   details + ObsPy waveform snippet
+o       open quake web page in browser
+s       source: All → USGS → EMSC → GFZ
+m       minimum magnitude
+c or /  country/region filter
+          iran   japan,chile   usa
+          (empty = everything)
+d       days: 1 → 3 → 7 → 30
+r       reload now (auto every 5 min)
+q       quit
+
+Mag colours: yellow ≥4  red ≥5  inverted ≥6
+Src: USGS+EMSC = same quake from both
+Command line: Events --help""".splitlines()
+LIMIT = 1000
+
+# extra words matched for some country names (USGS writes "…, CA" / "…, Alaska")
+ALIASES = {
+    "usa": ["united states", ", ca", "california", "alaska", "hawaii", "nevada", "oklahoma",
+            "texas", "washington", "oregon", "utah", "idaho", "montana", "wyoming",
+            "puerto rico", "new mexico", "arizona", "colorado", "kansas", "tennessee"],
+    "uk": ["united kingdom", "england", "scotland", "wales", "britain"],
+    "iran": ["iran"], "turkey": ["turkey", "turkiye", "türkiye"],
+}
+ALIASES["us"] = ALIASES["united states"] = ALIASES["usa"]
+
+
+@dataclass
+class Event:
+    time: datetime
+    lat: float
+    lon: float
+    depth: float
+    mag: float
+    magtype: str
+    region: str
+    source: str
+    evid: str
+    also: list = field(default_factory=list)   # other agencies reporting it
+
+    @property
+    def url(self):
+        if self.source == "USGS":
+            return f"https://earthquake.usgs.gov/earthquakes/eventpage/{self.evid}"
+        if self.source == "EMSC":
+            return f"https://www.seismicportal.eu/eventdetails.html?unid={self.evid}"
+        return f"https://geofon.gfz-potsdam.de/eqinfo/event.php?id={self.evid}"
+
+
+# ---------------------------------------------------------------- data
+def _float(s, default=math.nan):
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_time(s):
+    s = s.strip().rstrip("Z")
+    if "." in s:                       # trim to microseconds for fromisoformat
+        a, b = s.split(".", 1)
+        s = f"{a}.{b[:6]:0<6}"
+    return datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
+
+
+def fetch(source, days, minmag):
+    start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    q = {"format": "text", "starttime": start, "orderby": "time", "limit": LIMIT}
+    if minmag > 0:
+        q["minmagnitude"] = minmag
+    url = SOURCES[source] + "?" + urllib.parse.urlencode(q)
+    req = urllib.request.Request(url, headers={"User-Agent": "SEISBOX-Events/1.0"})
+    with urllib.request.urlopen(req, timeout=25) as r:
+        if r.status == 204:            # FDSN: no events
+            return []
+        text = r.read().decode("utf-8", "replace")
+    out = []
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        p = line.split("|")
+        if len(p) < 13:
+            continue
+        try:
+            t = _parse_time(p[1])
+        except ValueError:
+            continue
+        if len(p) > 13 and p[13] and p[13] != "earthquake":
+            continue                    # GFZ: skip explosions, quarry blasts…
+        out.append(Event(t, _float(p[2]), _float(p[3]), _float(p[4]), _float(p[10]),
+                         p[9] or "M", p[12].strip(), source, p[0].strip()))
+    return out
+
+
+def _dist_deg(a, b):
+    dlat = a.lat - b.lat
+    dlon = (a.lon - b.lon) * math.cos(math.radians((a.lat + b.lat) / 2))
+    return math.hypot(dlat, dlon)
+
+
+def merge(lists):
+    """Combine sources; same quake (≤60 s, ≤1.5°) reported twice is shown once."""
+    order = {"USGS": 0, "EMSC": 1, "GFZ": 2}
+    allev = sorted((e for l in lists for e in l), key=lambda e: (e.time, order[e.source]))
+    kept = []
+    for e in allev:
+        dup = None
+        for k in reversed(kept[-60:]):
+            if (e.time - k.time).total_seconds() > 60:
+                break                   # older than 60 s: no match possible
+            if k.source != e.source and e.source not in k.also and _dist_deg(e, k) <= 1.5:
+                dup = k
+                break
+        if dup:
+            dup.also.append(e.source)
+        else:
+            kept.append(e)
+    return sorted(kept, key=lambda e: e.time, reverse=True)
+
+
+def load(source, days, minmag):
+    names = list(SOURCES) if source == "All" else [source]
+    results, errors = [], []
+    with ThreadPoolExecutor(len(names)) as ex:
+        futs = {n: ex.submit(fetch, n, days, minmag) for n in names}
+        for n, f in futs.items():
+            try:
+                r = f.result()
+                results.append(r)
+                if len(r) >= LIMIT:     # server cap: older events in the window are missing
+                    span = (r[0].time - r[-1].time).total_seconds() / 3600 if r else 0
+                    errors.append(f"{n}: newest {LIMIT} only (~{span:.0f}h), raise mag")
+            except Exception as e:      # network/server problem: keep the others
+                errors.append(f"{n}: {e.__class__.__name__}")
+    return merge(results), errors
+
+
+def matches(ev, country, minmag):
+    if not (ev.mag >= minmag or (minmag <= 0)):
+        return False
+    if not country:
+        return True
+    reg = ev.region.lower()
+    for term in (t.strip().lower() for t in country.split(",")):
+        if term and any(w in reg for w in ALIASES.get(term, [term])):
+            return True
+    return False
+
+
+def ago(t):
+    s = (datetime.now(timezone.utc) - t).total_seconds()
+    if s < 3600:
+        return f"{max(0, int(s // 60))}m"
+    if s < 86400:
+        return f"{int(s // 3600)}h"
+    return f"{int(s // 86400)}d"
+
+
+# ---------------------------------------------------------------- plain list
+def print_list(args):
+    evs, errs = load(args.source, args.days, args.mag)
+    evs = [e for e in evs if matches(e, args.country, args.mag)]
+    for e in errs:
+        print("warning:", e, file=sys.stderr)
+    print(f"{'Time (UTC)':19}  {'Mag':>5}  {'Depth':>5}  {'Lat':>7} {'Lon':>8}  Src   Region")
+    for e in evs:
+        print(f"{e.time:%Y-%m-%d %H:%M:%S}  {e.mag:5.1f}  {e.depth:5.0f}  {e.lat:7.2f} {e.lon:8.2f}"
+              f"  {e.source:5} {e.region}")
+    print(f"{len(evs)} events", file=sys.stderr)
+
+
+# ---------------------------------------------------------------- TUI
+class App:
+    def __init__(self, scr, args):
+        self.scr = scr
+        self.source, self.days = args.source, args.days
+        self.minmag, self.country = args.mag, args.country
+        self.events, self.view, self.errors = [], [], []
+        self.sel = self.top = 0
+        self.loading = False
+        self.updated = None
+        self.msg = ""
+        self.lock = threading.Lock()
+        curses.curs_set(0)
+        curses.use_default_colors()
+        for i, c in enumerate([curses.COLOR_CYAN, curses.COLOR_YELLOW, curses.COLOR_RED,
+                               curses.COLOR_MAGENTA, curses.COLOR_GREEN], 1):
+            curses.init_pair(i, c, -1)
+        curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_CYAN)
+        scr.timeout(500)
+        scr.keypad(True)
+
+    # -- data
+    def refresh_data(self):
+        if self.loading:
+            return
+        self.loading = True
+        src, days, mm = self.source, self.days, self.minmag
+
+        def work():
+            evs, errs = load(src, days, mm)
+            with self.lock:
+                self.events, self.errors = evs, errs
+                self.updated = datetime.now(timezone.utc)
+                self.loading = False
+                self.apply_filter()
+        threading.Thread(target=work, daemon=True).start()
+
+    def apply_filter(self):
+        self.view = [e for e in self.events if matches(e, self.country, self.minmag)]
+        self.sel = min(self.sel, max(0, len(self.view) - 1))
+
+    # -- drawing helpers
+    def put(self, y, x, s, attr=0):
+        h, w = self.scr.getmaxyx()
+        if 0 <= y < h and x < w:
+            try:
+                self.scr.addnstr(y, x, s, w - x - (1 if y == h - 1 else 0), attr)
+            except curses.error:
+                pass
+
+    def magattr(self, m):
+        if m >= 6:
+            return curses.color_pair(3) | curses.A_BOLD | curses.A_REVERSE
+        if m >= 5:
+            return curses.color_pair(3) | curses.A_BOLD
+        if m >= 4:
+            return curses.color_pair(2) | curses.A_BOLD
+        return 0
+
+    def draw(self):
+        s = self.scr
+        s.erase()
+        h, w = s.getmaxyx()
+        bar = curses.color_pair(6) | curses.A_BOLD
+        self.put(0, 0, " " * w, bar)
+        self.put(0, 0, " EVENTS · latest earthquakes", bar)
+        status = "loading…" if self.loading else (f"{len(self.view)} ev · {self.updated:%H:%M} UTC"
+                                                   if self.updated else "")
+        self.put(0, max(0, w - len(status) - 1), status, bar)
+        filt = (f" Src:{self.source}  M≥{self.minmag:g}  {self.days}d  "
+                f"Region:{self.country or 'any'}")
+        self.put(1, 0, filt, curses.color_pair(1))
+
+        wide = w >= 70
+        hdr = (" Time UTC     Ago  Mag  Dep  Region" if not wide else
+               " Time (UTC)        Ago   Mag     Depth  Src            Region")
+        self.put(2, 0, hdr.ljust(w), curses.A_UNDERLINE | curses.A_BOLD)
+
+        rows = h - 4
+        if self.sel < self.top:
+            self.top = self.sel
+        elif self.sel >= self.top + rows:
+            self.top = self.sel - rows + 1
+        for i, e in enumerate(self.view[self.top:self.top + rows]):
+            y, idx = 3 + i, self.top + i
+            sel = curses.A_REVERSE if idx == self.sel else 0
+            mag = f"{e.mag:4.1f}" if not math.isnan(e.mag) else "  ? "
+            dep = f"{round(e.depth) or 0:4d}" if not math.isnan(e.depth) else "   ?"
+            if wide:
+                src = "+".join([e.source] + e.also)
+                left = f" {e.time:%m-%d %H:%M:%S}  {ago(e.time):>4}  "
+                self.put(y, 0, left, sel)
+                self.put(y, len(left), f"{mag}{e.magtype[:3]:<3}", self.magattr(e.mag) | sel)
+                rest = f" {dep} km  {src:<14} {e.region}"
+                self.put(y, len(left) + 7, rest.ljust(w), sel)
+            else:
+                left = f" {e.time:%d %H:%M} {ago(e.time):>4} "
+                self.put(y, 0, left, sel)
+                self.put(y, len(left), mag, self.magattr(e.mag) | sel)
+                self.put(y, len(left) + 4, f" {dep} {e.region}".ljust(w), sel)
+        if not self.view and not self.loading:
+            self.put(4, 2, "No events match. Try a lower magnitude (m), longer window (d)")
+            self.put(5, 2, "or clear the region filter (c, then Enter on empty).")
+
+        foot = self.msg or ("! " + "; ".join(self.errors) if self.errors else
+                            ("↑↓ Enter:info s:src m:mag c:region d:days r:reload o:web ?:help q:quit"
+                             if w >= 75 else "Enter:info s:src m:mag c:region d:days ?:help q"))
+        self.put(h - 1, 0, foot.ljust(w), curses.color_pair(2 if self.errors and not self.msg else 1))
+        s.refresh()
+
+    def prompt(self, label, hint="", default=""):
+        h, w = self.scr.getmaxyx()
+        if hint:
+            self.put(h - 2, 0, hint.ljust(w), curses.color_pair(1) | curses.A_REVERSE)
+        self.put(h - 1, 0, " " * (w - 1))
+        self.put(h - 1, 0, label, curses.A_BOLD)
+        curses.echo(); curses.curs_set(1); self.scr.timeout(-1)
+        try:
+            raw = self.scr.getstr(h - 1, len(label), max(8, w - len(label) - 1))
+            val = raw.decode("utf-8", "replace").strip()
+        except Exception:
+            val = None
+        finally:
+            curses.noecho(); curses.curs_set(0); self.scr.timeout(500)
+        return default if val is None else val
+
+    def popup(self, lines):
+        h, w = self.scr.getmaxyx()
+        wrapped = []
+        for l in lines:
+            while len(l) > w - 6:
+                wrapped.append(l[:w - 6]); l = "    " + l[w - 6:]
+            wrapped.append(l)
+        lines = wrapped
+        bw = min(w - 2, max(len(l) for l in lines) + 4)
+        bh = min(h - 2, len(lines) + 2)
+        win = curses.newwin(bh, bw, max(0, (h - bh) // 2), max(0, (w - bw) // 2))
+        win.box()
+        for i, l in enumerate(lines[:bh - 2]):
+            try:
+                win.addnstr(1 + i, 2, l, bw - 4)
+            except curses.error:
+                pass
+        win.refresh()
+        self.scr.timeout(-1)
+        k = self.scr.getch()
+        self.scr.timeout(500)
+        return k
+
+    def details(self, e):
+        st = e.time.strftime("%Y-%m-%dT%H:%M:%S")
+        lines = [
+            f"{e.magtype} {e.mag:.1f}  —  {e.region}",
+            "",
+            f"Time    {e.time:%Y-%m-%d %H:%M:%S} UTC  ({ago(e.time)} ago)",
+            f"Place   {e.lat:.3f}°, {e.lon:.3f}°   depth {e.depth:.1f} km",
+            f"Source  {e.source}   id {e.evid}",
+            f"Also    {', '.join(e.also) or '—'}",
+            "",
+            "Web     " + e.url,
+            "",
+            "Waveforms (in geo / python):",
+            "  from obspy.clients.fdsn import Client",
+            "  from obspy import UTCDateTime",
+            f"  t = UTCDateTime('{st}')",
+            "  st = Client('IRIS').get_waveforms('IU','*','00','BHZ', t, t+3600)",
+            "",
+            "o: open web page   any other key: close",
+        ]
+        if self.popup(lines) in (ord("o"), ord("O")):
+            self.open_url(e)
+
+    def open_url(self, e):
+        try:
+            subprocess.Popen(["termux-open-url", e.url], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            self.msg = "Opening " + e.url
+        except FileNotFoundError:
+            self.msg = e.url
+
+    def run(self):
+        self.refresh_data()
+        last = time.time()
+        while True:
+            with self.lock:
+                self.draw()
+            k = self.scr.getch()
+            if k == -1:
+                if time.time() - last > REFRESH_SEC:
+                    last = time.time(); self.refresh_data()
+                continue
+            self.msg = ""
+            n = len(self.view)
+            h = self.scr.getmaxyx()[0]
+            if k in (ord("q"), ord("Q"), 27):
+                return
+            elif k in (curses.KEY_DOWN, ord("j")):
+                self.sel = min(n - 1, self.sel + 1) if n else 0
+            elif k in (curses.KEY_UP, ord("k")):
+                self.sel = max(0, self.sel - 1)
+            elif k == curses.KEY_NPAGE:
+                self.sel = min(max(0, n - 1), self.sel + h - 4)
+            elif k == curses.KEY_PPAGE:
+                self.sel = max(0, self.sel - (h - 4))
+            elif k == curses.KEY_HOME:
+                self.sel = 0
+            elif k == curses.KEY_END:
+                self.sel = max(0, n - 1)
+            elif k in (10, 13, curses.KEY_ENTER) and n:
+                self.details(self.view[self.sel])
+            elif k in (ord("o"), ord("O")) and n:
+                self.open_url(self.view[self.sel])
+            elif k in (ord("s"), ord("S")):
+                self.source = SOURCE_CYCLE[(SOURCE_CYCLE.index(self.source) + 1) % len(SOURCE_CYCLE)]
+                self.sel = 0; last = time.time(); self.refresh_data()
+            elif k in (ord("d"), ord("D")):
+                i = DAYS_CYCLE.index(self.days) if self.days in DAYS_CYCLE else -1
+                self.days = DAYS_CYCLE[(i + 1) % len(DAYS_CYCLE)]
+                self.sel = 0; last = time.time(); self.refresh_data()
+            elif k in (ord("m"), ord("M")):
+                v = self.prompt(f"Min magnitude [{self.minmag:g}]: ", "e.g. 2.5, 4, 6   (Enter on empty = keep)")
+                if v:
+                    try:
+                        new = float(v.replace(",", "."))
+                        refetch = new < self.minmag     # lower → need more data
+                        self.minmag = new; self.sel = 0
+                        if refetch:
+                            last = time.time(); self.refresh_data()
+                        else:
+                            self.apply_filter()
+                    except ValueError:
+                        self.msg = "Not a number: " + v
+            elif k in (ord("c"), ord("C"), ord("/")):
+                v = self.prompt("Region: ", "e.g. iran   japan,chile   usa   (Enter on empty = all)")
+                self.country = v; self.sel = 0; self.apply_filter()
+            elif k in (ord("r"), ord("R")):
+                last = time.time(); self.refresh_data()
+            elif k == ord("?"):
+                self.popup(HELP)
+
+
+def main():
+    p = argparse.ArgumentParser(description="Latest earthquakes worldwide (USGS, EMSC, GFZ).")
+    p.add_argument("--source", "-s", default="All", type=lambda s: s.upper() if s.lower() != "all" else "All",
+                   choices=SOURCE_CYCLE, help="All, USGS, EMSC or GFZ (default All)")
+    p.add_argument("--mag", "-m", type=float, default=4.0, help="minimum magnitude (default 4.0)")
+    p.add_argument("--country", "-c", default="", help="country/region text, comma = OR")
+    p.add_argument("--days", "-d", type=int, default=3, help="time window in days (default 3)")
+    p.add_argument("--list", "-l", action="store_true", help="print a table instead of the TUI")
+    args = p.parse_args()
+    if args.list or not sys.stdout.isatty():
+        print_list(args)
+    else:
+        curses.wrapper(lambda scr: App(scr, args).run())
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

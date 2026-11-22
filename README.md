@@ -242,6 +242,7 @@ All commands are typed in **Termux**:
 | `ubx` | Same as `geo`, plus it starts the X server and sets `DISPLAY=:0`. Matplotlib windows open in the Termux:X11 app. |
 | `gpy script.py` | Runs one script with the geo Python without opening a shell. Use full paths, e.g. `gpy /sdcard/termux/projects/x.py`. |
 | `seislive ...` | Live waveform viewer (see below). |
+| `Events` | Latest earthquakes worldwide, filterable (see below). Runs in Termux directly, so it starts instantly. |
 | `welcome` | Shows the command list again. |
 
 Typical session:
@@ -302,6 +303,36 @@ seislive                                        # default: IU.ANMO.00.BHZ, 10 mi
 seislive IU.ANMO.00.BHZ IU.COLA.00.BHZ --minutes 10 --filter 0.5 5
 ```
 
+### `Events`: latest earthquakes worldwide
+
+A full-screen list of recent earthquakes from **USGS**, **EMSC** and **GFZ GEOFON** (FDSN event
+services, no account needed). With source `All`, a quake reported by several agencies is shown
+once, with all of them in the `Src` column (e.g. `USGS+EMSC+GFZ`). It uses only Python's standard
+library and runs on Termux's own Python, so it starts instantly and doesn't need `geo`.
+
+```bash
+Events                         # last 3 days, M≥4, all sources
+Events -m 5 -c japan           # start with filters
+Events -s emsc -d 7 -c iran    # one source, 7 days
+Events --list -m 4.5 -c chile  # plain table instead of the TUI (for scripts / piping)
+```
+
+| Key | Action |
+|---|---|
+| ↑ ↓ PgUp PgDn | move |
+| Enter | details: time, location, depth, agencies, web link, and a ready ObsPy snippet to fetch waveforms |
+| `o` | open the quake's page in the browser |
+| `s` | source: All → USGS → EMSC → GFZ |
+| `m` | minimum magnitude |
+| `c` or `/` | country/region filter. Text is matched against the region name; commas mean OR (`japan,chile`). `usa` also matches US states and `, CA` |
+| `d` | time window: 1 → 3 → 7 → 30 days |
+| `r` | reload (it also refreshes itself every 5 minutes) |
+| `?` / `q` | help / quit |
+
+Magnitudes are coloured: yellow ≥ 4, red ≥ 5, inverted red ≥ 6. Each service returns at most
+1000 events. With a low magnitude and a long window, the bottom bar warns that older events are
+cut off. Raise the magnitude or shorten the window.
+
 ### `irsc_bulletin`: Iranian Seismological Center catalogue
 
 IRSC has no FDSN service, but it reports to the ISC as agency `TEH`. This tool queries the ISC
@@ -358,7 +389,9 @@ SEISBOX/
 │   ├── seisbox.bashrc          # → ~/.seisbox.bashrc (aliases geo, ubx, gpy, welcome)
 │   ├── welcome.txt             # → ~/.termux_welcome
 │   ├── gnuplot                 # → ~/.gnuplot (braille terminal output)
-│   └── bin/seislive            # → $PREFIX/bin/seislive
+│   └── bin/
+│       ├── seislive            # → $PREFIX/bin/seislive
+│       └── Events              # → $PREFIX/bin/Events (+ events)
 ├── examples/tplot_demo.py
 └── projects/
     ├── seis_live/seis_live.py

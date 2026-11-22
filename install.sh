@@ -26,7 +26,7 @@ pkg update -y -o Dpkg::Options::=--force-confnew
 pkg upgrade -y -o Dpkg::Options::=--force-confnew
 
 say "2/6  Installing Termux packages"
-pkg install -y proot-distro git curl wget chafa gnuplot x11-repo
+pkg install -y proot-distro git curl wget chafa gnuplot python x11-repo
 pkg install -y termux-x11-nightly
 
 say "3/6  Shared storage (/sdcard)"
@@ -50,6 +50,8 @@ proot-distro login "$DISTRO" --bind "$REPO:/opt/seisbox" \
 
 say "6/6  Termux shortcuts, welcome screen, example projects"
 install -m 755 "$REPO/termux/bin/seislive" "$PREFIX/bin/seislive"
+install -m 755 "$REPO/termux/bin/Events" "$PREFIX/bin/Events"
+ln -sf Events "$PREFIX/bin/events"
 cp "$REPO/termux/seisbox.bashrc" "$HOME/.seisbox.bashrc"
 sed -i "s|^export SEISBOX_PROJECTS=.*|export SEISBOX_PROJECTS=\"$PROJECTS\"|" "$HOME/.seisbox.bashrc"
 grep -qs 'seisbox.bashrc' "$HOME/.bashrc" || \
@@ -68,5 +70,6 @@ Then try:
   geo                        Ubuntu shell with Python 3.12 + all packages
   python $PROJECTS/tplot_demo.py     (inside geo) plot in the terminal
   seislive IU.ANMO.00.BHZ    live seismogram (needs the Termux:X11 app)
+  Events                     latest earthquakes worldwide (filter by source, region, magnitude)
   welcome                    show the command list
 EOF

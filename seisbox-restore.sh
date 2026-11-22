@@ -61,6 +61,7 @@ grep -qs 'seisbox.bashrc' "$HOME/.bashrc" || \
 [ -f "$HOME/.termux_welcome" ] || cp "$R/termux/welcome.txt" "$HOME/.termux_welcome"
 [ -f "$HOME/.gnuplot" ] || cp "$R/termux/gnuplot" "$HOME/.gnuplot"
 install -m 755 "$R/termux/bin/seislive" "$PREFIX/bin/seislive"
+install -m 755 "$R/termux/bin/Events" "$PREFIX/bin/Events"; ln -sf Events "$PREFIX/bin/events"
 if [ -f "$B/termux.properties" ] && [ ! -f "$HOME/.termux/termux.properties" ]; then
   mkdir -p "$HOME/.termux"; cp "$B/termux.properties" "$HOME/.termux/"
   termux-reload-settings 2>/dev/null || true

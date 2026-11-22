@@ -12,6 +12,9 @@
  ubx        geo + X11 display (:0) — plot
             windows open in the Termux:X11 app
  gpy x.py   run one script with geo Python
+ Events     latest earthquakes worldwide
+            filter: source, region, magnitude
+            Events -m 5 -c japan
  seislive   live seismograms (Termux:X11)
             seislive IU.ANMO.00.BHZ
               --minutes 10 --filter 0.5 5
