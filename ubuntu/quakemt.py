@@ -15,8 +15,12 @@ Usage
   quakemt --time 2026-11-21T09:42:07 --lat -7.62 --lon 127.39 --depth 116 --mag 6.8
   quakemt ... --invert                 also run the waveform inversion
   quakemt ... --invert --stations 30 --depths 90,110,130
-Output: text summary + beachballs in the terminal, and files in --outdir
-(report.png, fits.png, solution.json).
+Output: text summary + beachballs in the terminal, and files in a folder named
+after the quake (or --name), under $SEISBOX_PROJECTS/mt/:
+  published_mechanisms.png  published_summary.txt  published.json      (layer 1 run)
+  inversion_mechanism.png   inversion_waveform_fits.png
+  inversion_summary.txt     inversion.json                             (--invert run)
+and one line per run in $SEISBOX_PROJECTS/mt/index.csv.
 """
 import argparse
 import io
@@ -45,8 +49,33 @@ C = {"ok": "\033[32m", "warn": "\033[33m", "bad": "\033[31m", "h": "\033[1;36m",
      "b": "\033[1m", "0": "\033[0m"}
 
 
+TEE = None          # set in main(): copies terminal output into the summary file
+
+
 def say(msg, kind="h"):
     print(f"{C[kind]}{msg}{C['0']}", flush=True)
+
+
+def detail(msg):
+    """Only for the saved summary file, not the terminal."""
+    if TEE is not None:
+        TEE.buf.append(msg + "\n")
+
+
+def progress(msg):
+    """One self-overwriting status line on the terminal (not saved)."""
+    out = TEE.stream if TEE is not None else sys.stdout
+    out.write(f"\r\033[K{C['dim']}  {msg}{C['0']}" if msg else "\r\033[K")
+    out.flush()
+
+
+def show(text):
+    """Print lines; lines starting with '~' go to the summary file only."""
+    for line in text.splitlines():
+        if line.startswith("~"):
+            detail(line[1:])
+        else:
+            print(line)
 
 
 def http(url, timeout=40):
@@ -288,7 +317,7 @@ def download_data(ev, stations, t_end, band, n):
             data[f"{s['net']}.{s['sta']}"] = {c: filt(to_grid(sub.select(component=c)[0], t0, n), band)
                                                for c in "ZRT"}
         except Exception as e:
-            say(f"    skip {s['net']}.{s['sta']}: {str(e)[:70] or e.__class__.__name__}", "dim")
+            detail(f"    skip {s['net']}.{s['sta']}: {str(e)[:70] or e.__class__.__name__}")
     return data
 
 
@@ -423,7 +452,8 @@ def trace_vr(sol):
 
 def invert(ev, args, outdir):
     band = tuple(float(x) for x in args.band.split(",")) if args.band else band_for(ev["mag"])
-    say(f"\n▶ Layer 2: waveform inversion  (periods {band[0]:.0f}-{band[1]:.0f} s, model {MODEL})")
+    say("\n▶ Own inversion (about 1-3 min)")
+    detail(f"  waveform inversion: periods {band[0]:.0f}-{band[1]:.0f} s, model {MODEL}")
     t_start = time.time()
     dmin = args.dmin if args.dmin is not None else (12.0 if ev["mag"] < 6.0 else 25.0)
     dmax = args.dmax if args.dmax is not None else (60.0 if ev["mag"] < 6.0 else 90.0)
@@ -432,14 +462,14 @@ def invert(ev, args, outdir):
     if len(stations) < 6:
         raise RuntimeError(f"only {len(stations)} usable stations at {dmin:.0f}-{dmax:.0f}°")
     gap = azimuthal_gap([s["az"] for s in stations])
-    say(f"  stations: {len(stations)} requested of {ncand} available at {dmin:.0f}-{dmax:.0f}° "
-        f"(azimuthal gap {gap:.0f}°)", "dim")
+    detail(f"  stations: {len(stations)} requested of {ncand} available at {dmin:.0f}-{dmax:.0f}° "
+           f"(azimuthal gap {gap:.0f}°)")
     t_end = max(s["dist"] for s in stations) * 111.19 / 3.4 + 400
     n = int((t_end + PAD) / DT)
-    say("  downloading waveforms + responses (IRIS federator)…", "dim")
+    progress(f"downloading waveforms from {len(stations)} stations…")
     data = download_data(ev, stations, t_end, band, n)
     stations = [s for s in stations if f"{s['net']}.{s['sta']}" in data]
-    say(f"  usable 3-component records: {len(stations)}", "dim")
+    detail(f"  usable 3-component records: {len(stations)}")
     if len(stations) < 6:
         raise RuntimeError("too few usable records")
     win = windows(ev, stations, n)
@@ -457,7 +487,7 @@ def invert(ev, args, outdir):
                 keys.append((key, c))
 
     nsta_clear = len({k for k, _ in keys})
-    say(f"  traces with clear signal (SNR > 3): {len(keys)} from {nsta_clear} stations", "dim")
+    detail(f"  traces with clear signal (SNR > 3): {len(keys)} from {nsta_clear} stations")
     if len(keys) < 8 or nsta_clear < 4:
         raise RuntimeError("too few records with a clear long-period signal "
                            f"({len(keys)} traces). The quake may be too small, or masked by a "
@@ -475,7 +505,8 @@ def invert(ev, args, outdir):
     queue = list(depths)
     while queue:
         dep = queue.pop(0)
-        say(f"  Green's functions (Syngine) + inversion at {dep:.0f} km…", "dim")
+        progress(f"Green's functions + inversion at {dep:.0f} km depth "
+                 f"({len(results) + 1}/{len(results) + len(queue) + 1})…")
         gcache[dep] = greens(ev, stations, dep, t_end, band, n)
         use = [k for k in keys if k[0] in gcache[dep] and k[1] in gcache[dep][k[0]]
                and all(x is not None for x in gcache[dep][k[0]][k[1]])]
@@ -489,8 +520,8 @@ def invert(ev, args, outdir):
         sol.update(depth=dep, keys=use)
         results.append(sol)
         lg = np.abs(list(sol["lags"].values())) if sol["lags"] else np.zeros(1)
-        say(f"    depth {dep:5.0f} km   VR {sol['vr']:5.1f} %   shift {sol['shift']:+.0f} s   "
-            f"station lags median {np.median(lg):.0f} s   traces {len(use)}", "dim")
+        detail(f"    depth {dep:5.0f} km   VR {sol['vr']:5.1f} %   shift {sol['shift']:+.0f} s   "
+               f"station lags median {np.median(lg):.0f} s   traces {len(use)}")
         if not queue and len(results) < 9 and not args.depths:   # best at an edge -> extend
             done = sorted(r["depth"] for r in results)
             top = max(results, key=lambda r: r["vr"])["depth"]
@@ -509,6 +540,7 @@ def invert(ev, args, outdir):
                  shift=best["shift"], depth_range=(min(near), max(near)), ntraces=len(best["keys"]), nsta=len({k for k, _ in best["keys"]}),
                  gap=gap, band=band, model=MODEL, runtime=time.time() - t_start,
                  depth_curve=[(r["depth"], r["vr"]) for r in results])
+    progress("")
     plot_fits(ev, best, stations, win, outdir, band)
     return props
 
@@ -520,7 +552,8 @@ def azimuthal_gap(az):
 
 # ===================================================================== output
 def fmt_sol(s):
-    lines = [f"{C['b']}{s['agency']}{C['0']}"]
+    name = "Own inversion (SEISBOX)" if s["agency"].startswith("SEISBOX") else s["agency"]
+    lines = [f"{C['b']}{name}{C['0']}"]
     if "Mw" in s:
         lines.append(f"  Mw {s['Mw']:.2f}   M0 {s['M0']:.2e} N·m   depth "
                      f"{s['depth']:.0f} km" if s.get("depth") is not None else
@@ -537,10 +570,10 @@ def fmt_sol(s):
         lines.append(f"  type: {s['type']}   double-couple {s['dc']:.0f} %  CLVD {s['clvd']:.0f} %")
         m = s["m"]
         e = int(math.floor(math.log10(s["M0"])))
-        lines.append(f"  {C['dim']}Mrr {m[0]/10**e:+.2f}  Mtt {m[1]/10**e:+.2f}  Mpp {m[2]/10**e:+.2f}  "
-                     f"Mrt {m[3]/10**e:+.2f}  Mrp {m[4]/10**e:+.2f}  Mtp {m[5]/10**e:+.2f}  ×10^{e} N·m{C['0']}")
+        lines.append(f"~  Mrr {m[0]/10**e:+.2f}  Mtt {m[1]/10**e:+.2f}  Mpp {m[2]/10**e:+.2f}  "
+                     f"Mrt {m[3]/10**e:+.2f}  Mrp {m[4]/10**e:+.2f}  Mtp {m[5]/10**e:+.2f}  ×10^{e} N·m")
     if "vr" in s:
-        lines.append(f"  variance reduction {s['vr']:.0f} %")
+        lines.append(f"~  variance reduction {s['vr']:.0f} %")
     return "\n".join(lines)
 
 
@@ -558,7 +591,7 @@ def beach_figure(sols, title, path, terminal):
         fm = s["m"] if "m" in s else s["np1"]
         ax.add_collection(beach(fm, xy=(1.3 + 2.6 * i, 1.3), width=2.1, linewidth=1,
                                 facecolor="#d62728" if mine else "#1f77b4"))
-        lab = s["agency"].replace("SEISBOX inversion", "SEISBOX (this)")
+        lab = s["agency"].replace("SEISBOX inversion", "SEISBOX (own)")
         sub = f"Mw {s['Mw']:.1f}" if "Mw" in s else ""
         if s.get("depth") is not None:
             sub += f"  {s['depth']:.0f} km"
@@ -607,11 +640,60 @@ def plot_fits(ev, best, stations, win, outdir, band):
                 ax.set_title(c, fontsize=9)
     fig.suptitle(f"Waveform fit: data (black) vs synthetic (red), {band[0]:.0f}-{band[1]:.0f} s, "
                  f"depth {best['depth']:.0f} km, VR {best['vr']:.0f} %", fontsize=10)
-    fig.savefig(os.path.join(outdir, "fits.png"), dpi=100, bbox_inches="tight")
+    fig.savefig(os.path.join(outdir, "inversion_waveform_fits.png"), dpi=100, bbox_inches="tight")
     plt.close(fig)
 
 
 # ===================================================================== main
+def safe_name(text):
+    """Folder-safe ASCII: 'M6.8 45 km SE of Ürümqi, China' -> 'M6.8_45km-SE-of-Urumqi-China'."""
+    import re
+    import unicodedata
+    t = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    t = re.sub(r"(\d)\s+km\b", r"\1km", t)
+    t = re.sub(r"[^A-Za-z0-9.+-]+", "-", t).strip("-")
+    return t[:60]
+
+
+def default_folder(t, mag, region):
+    """e.g. 2026-11-21_0942UTC_M6.8_Banda-Sea (same rule as Events)."""
+    return f"{t.strftime('%Y-%m-%d_%H%M')}UTC_M{mag:.1f}_" + safe_name(region or "event")
+
+
+class Tee:
+    """Copy everything printed to a buffer, saved later as the run's summary.txt."""
+    def __init__(self, stream):
+        self.stream, self.buf = stream, []
+
+    def write(self, x):
+        self.buf.append(x)
+        return self.stream.write(x)
+
+    def flush(self):
+        self.stream.flush()
+
+    def text(self):
+        import re
+        return re.sub(r"\x1b\[[0-9;]*m", "", "".join(self.buf))
+
+
+def append_index(mtdir, folder, ev, region, layer, best):
+    path = os.path.join(mtdir, "index.csv")
+    new = not os.path.exists(path)
+    row = [ev["time"].strftime("%Y-%m-%d %H:%M:%S"), f"{ev['mag']:.1f}", region.replace(",", " "),
+           f"{ev['lat']:.3f}", f"{ev['lon']:.3f}", layer, folder,
+           f"{best['agency']}" if best else "none",
+           f"{best['Mw']:.2f}" if best and "Mw" in best else "",
+           "/".join(f"{x:.0f}" for x in best["np1"]) if best else "",
+           best.get("type", "") if best else "",
+           f"{best['vr']:.0f}" if best and "vr" in best else ""]
+    with open(path, "a") as f:
+        if new:
+            f.write("quake_time_utc,catalog_mag,region,lat,lon,layer,folder,solution,Mw,"
+                    "strike/dip/rake,fault_type,VR_percent\n")
+        f.write(",".join(row) + "\n")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--time", required=True, help="origin time (UTC, ISO)")
@@ -627,31 +709,37 @@ def main():
     p.add_argument("--depths", default="", help="comma list of trial depths, km")
     p.add_argument("--band", default="", help="period band 'Tmin,Tmax' in s (default by magnitude)")
     p.add_argument("--maxlag", type=float, default=30.0, help="max per-station time lag, s (default 30)")
-    p.add_argument("--outdir", default="")
-    p.add_argument("--no-terminal-plot", action="store_true")
+    p.add_argument("--name", default="", help="folder name under $SEISBOX_PROJECTS/mt "
+                   "(default: date_time_magnitude_region)")
+    p.add_argument("--outdir", default="", help="full output folder path (overrides --name)")
+    p.add_argument("--no-terminal-plot", action="store_true", help=argparse.SUPPRESS)  # kept for old calls
     a = p.parse_args()
 
     ev = {"time": UTCDateTime(a.time), "lat": a.lat, "lon": a.lon, "depth": a.depth, "mag": a.mag}
-    tag = f"{ev['time'].strftime('%Y%m%d_%H%M%S')}_M{a.mag:.1f}"
-    outdir = a.outdir or os.path.join(os.environ.get("SEISBOX_PROJECTS", "/sdcard/termux/projects"),
-                                      "mt", tag)
+    mtdir = os.path.join(os.environ.get("SEISBOX_PROJECTS", "/sdcard/termux/projects"), "mt")
+    folder = safe_name(a.name) if a.name else default_folder(ev["time"], a.mag, a.region)
+    outdir = a.outdir or os.path.join(mtdir, folder)
     os.makedirs(outdir, exist_ok=True)
+    layer = "inversion" if a.invert else "published"
+    global TEE
+    tee = TEE = Tee(sys.stdout)
+    sys.stdout = tee
     title = f"M{a.mag:.1f} {a.region}  {ev['time'].strftime('%Y-%m-%d %H:%M:%S')} UTC  " \
             f"{a.lat:.2f}°, {a.lon:.2f}°  {a.depth:.0f} km"
     say(f"━━ {title}")
 
-    say("\n▶ Layer 1: published solutions")
+    say("\n▶ Published solutions")
     sols, usgs_id = published(ev)
     if not sols:
         say("  none published (yet). USGS/GFZ usually publish M5+ within ~20-60 min.", "warn")
     for s in sols:
-        print(fmt_sol(s))
+        show(fmt_sol(s))
     if len(sols) > 1 and "m" in sols[0]:
         ref = sols[0]
         for s in sols[1:]:
             if "m" in s:
-                print(f"  {C['dim']}{s['agency']} vs {ref['agency']}: Kagan angle "
-                      f"{kagan_angle(s['m'], ref['m']):.0f}°{C['0']}")
+                detail(f"  {s['agency']} vs {ref['agency']}: Kagan angle "
+                       f"{kagan_angle(s['m'], ref['m']):.0f}°")
 
     mine = None
     if a.invert:
@@ -660,35 +748,51 @@ def main():
         else:
             try:
                 mine = invert(ev, a, outdir)
-                say("\n▶ Result")
-                print(fmt_sol(mine))
+                show(fmt_sol(mine))
                 lo, hi = mine["depth_range"]
                 if hi > lo:
-                    print(f"  centroid depth {mine['depth']:.0f} km (fits within 2 % VR from {lo:.0f} to {hi:.0f} km)")
-                print(f"  centroid time shift {mine['shift']:+.0f} s   stations {mine['nsta']}  traces "
-                      f"{mine['ntraces']}   azimuthal gap {mine['gap']:.0f}°   ({mine['runtime']:.0f} s)")
+                    print(f"  depth range {lo:.0f}-{hi:.0f} km (fits nearly as well)")
+                detail(f"  centroid time shift {mine['shift']:+.0f} s   stations {mine['nsta']}  traces "
+                       f"{mine['ntraces']}   azimuthal gap {mine['gap']:.0f}°   ({mine['runtime']:.0f} s)")
                 curve = "  ".join(f"{d:.0f}km:{v:.0f}%" for d, v in mine["depth_curve"])
-                print(f"  {C['dim']}VR by depth  {curve}{C['0']}")
+                detail(f"  VR by depth  {curve}")
                 q = mine["vr"]
                 qual = ("good", "ok") if q >= 60 else (("fair", "warn") if q >= 40 else ("poor", "bad"))
-                say(f"  quality: {qual[0]} (VR {q:.0f} %, gap {mine['gap']:.0f}°)", qual[1])
+                say(f"  fit quality: {qual[0]} (VR {q:.0f} %, {mine['nsta']} stations)", qual[1])
                 refs = [s for s in sols if "m" in s]
                 for s in refs[:3]:
-                    print(f"  vs {s['agency']:12}: Kagan angle {kagan_angle(mine['m'], s['m']):3.0f}°   "
-                          f"ΔMw {mine['Mw'] - s['Mw']:+.2f}")
-                print(f"  {C['dim']}Note: the data cannot tell which nodal plane is the actual fault;"
-                      f" use aftershocks or known faults.{C['0']}")
+                    detail(f"  vs {s['agency']:12}: Kagan angle {kagan_angle(mine['m'], s['m']):3.0f}°   "
+                           f"ΔMw {mine['Mw'] - s['Mw']:+.2f}")
+                detail("  Note: the data cannot tell which nodal plane is the actual fault;"
+                       " use aftershocks or known faults.")
             except Exception as e:
+                progress("")
                 say(f"  inversion failed: {e}", "bad")
 
     allsols = ([mine] if mine else []) + sols
+    files = []
     if allsols:
-        beach_figure(allsols, title, os.path.join(outdir, "report.png"), not a.no_terminal_plot)
-    with open(os.path.join(outdir, "solution.json"), "w") as f:
+        png = "inversion_mechanism.png" if a.invert else "published_mechanisms.png"
+        beach_figure(allsols, title, os.path.join(outdir, png), False)   # images: seisview / Termux:X11
+        files.append(png)
+    if mine:
+        files.append("inversion_waveform_fits.png")
+    with open(os.path.join(outdir, f"{layer}.json"), "w") as f:
         json.dump({"event": {**ev, "time": str(ev["time"]), "region": a.region, "usgs_id": usgs_id},
                    "solutions": [{k: v for k, v in s.items() if k not in ("d", "syn", "idx")}
                                  for s in allsols]}, f, indent=1, default=float)
-    say(f"\nfiles: {outdir}/  (report.png{', fits.png' if mine else ''}, solution.json)", "dim")
+    files += [f"{layer}_summary.txt", f"{layer}.json"]
+    say(f"\nSaved: {outdir}/", "dim")
+    for fn in files:
+        detail(f"   {fn}")
+    sys.stdout = tee.stream
+    with open(os.path.join(outdir, f"{layer}_summary.txt"), "w") as f:
+        f.write(tee.text())
+    try:
+        append_index(mtdir, os.path.basename(outdir.rstrip("/")), ev, a.region, layer,
+                     mine or (sols[0] if sols else None))
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":

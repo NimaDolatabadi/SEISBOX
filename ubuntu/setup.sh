@@ -43,6 +43,7 @@ cp "$SRC/ubuntu/tplot.py" "$SITE/tplot.py"
 
 echo "--> quakemt (focal mechanisms / moment-tensor inversion)"
 install -m 755 "$SRC/ubuntu/quakemt.py" "$VENV/bin/quakemt"
+install -m 755 "$SRC/ubuntu/imgview.py" "$VENV/bin/imgview"   # used by seisview
 
 echo "--> shell startup file for 'geo'"
 cp "$SRC/ubuntu/geo_rc" /root/.geo_rc

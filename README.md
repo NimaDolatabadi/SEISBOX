@@ -350,7 +350,7 @@ Events --live                  # start in live mode (30 s); Events --live 15 for
 | `d` | time window: 1 → 3 → 7 → 30 days |
 | `r` | reload now (it also refreshes itself every 5 minutes) |
 | `f` | **focal mechanism**: published USGS/GFZ moment tensors of the selected quake (see below) |
-| `F` | focal mechanism **+ own waveform inversion** (M5.5+, about 1–3 min) |
+| `F` (Shift+f) | focal mechanism **+ own waveform inversion** (M5.5+, about 1–3 min) |
 | `l` | **live mode** on/off: reloads every 30 s with a countdown in the header. Quakes that arrive while you watch get a green `●` for 10 minutes, and the phone beeps |
 | `?` / `q` | help / quit |
 
@@ -365,10 +365,38 @@ service answers, and a service that fails keeps its previous results on screen.
 
 ### `quakemt`: focal mechanisms and moment tensors
 
-Select a quake in `Events` and press **`f`** or **`F`**, or run `quakemt` directly
-(`quakemt --help`). Results are printed in the terminal (with beachballs drawn as text) and saved to
-`/sdcard/termux/projects/mt/<date>_<time>_M<mag>/` as `report.png` (beachballs), `fits.png`
-(waveform fits) and `solution.json`.
+Select a quake in `Events` and press **`f`** (published) or **`F`**, i.e. Shift+f (own inversion),
+or run `quakemt` directly (`quakemt --help`).
+
+The terminal shows only the **source parameters and mechanism**: Mw, M0, depth, both nodal planes,
+P/T/B axes, fault type and DC/CLVD %. For your own inversion it also shows the depth range and fit
+quality. Everything else goes into the saved summary file.
+
+**Where results are saved.** Before a run, `Events` asks for a folder name. Press Enter to accept
+the suggested name, or type your own. The folder is created under `/sdcard/termux/projects/mt/`:
+
+```
+mt/
+├── index.csv                                   ← one line per run: time, magnitude, region, folder, result
+└── 2026-11-21_0942UTC_M6.8_Banda-Sea/          ← date_time_magnitude_region (or your own name)
+    ├── published_mechanisms.png                ← f: USGS/GFZ beachballs
+    ├── published_summary.txt                   ← f: full text incl. tensors, agency comparison
+    ├── published.json
+    ├── inversion_mechanism.png                 ← F: own solution (red) next to USGS/GFZ (blue)
+    ├── inversion_waveform_fits.png             ← F: data (black) vs synthetics (red), per station
+    ├── inversion_summary.txt                   ← F: full log: stations, depth search, fit, Kagan angles
+    └── inversion.json
+```
+
+`f` and `F` write different files, so running both keeps both. On the command line, `--name` sets the
+folder name.
+
+**Viewing images.** Images are never drawn in the terminal. After a run, press `o` (mechanism) or
+`w` (waveform fits) to open them in **Termux:X11** with zoom and pan. The same works for any image:
+
+```bash
+seisview /sdcard/termux/projects/mt/2026-11-21_0942UTC_M6.8_Banda-Sea/*.png   # ←/→ next, q close
+```
 
 <p align="center"><img src="docs/media/mt-report.png" width="760" alt="SEISBOX moment tensor (red) next to USGS and GFZ solutions (blue)"></p>
 
@@ -461,6 +489,7 @@ SEISBOX/
 ├── ubuntu/
 │   ├── setup.sh                # runs inside Ubuntu: apt + venv + pip + self-test
 │   ├── quakemt.py              # → /root/geo/bin/quakemt (focal mechanisms / MT inversion)
+│   ├── imgview.py              # → /root/geo/bin/imgview (X11 image window for seisview)
 │   ├── geo_rc                  # → /root/.geo_rc
 │   └── tplot.py                # → venv site-packages
 ├── termux/
@@ -470,7 +499,8 @@ SEISBOX/
 │   └── bin/
 │       ├── seislive            # → $PREFIX/bin/seislive
 │       ├── Events              # → $PREFIX/bin/Events (+ events)
-│       └── quakemt             # → $PREFIX/bin/quakemt (runs the geo tool below)
+│       ├── quakemt             # → $PREFIX/bin/quakemt (runs the geo tool below)
+│       └── seisview            # → $PREFIX/bin/seisview (open images in Termux:X11)
 ├── docs/
 │   ├── media/                  # README images and GIFs
 │   └── tools/                  # scripts that make them (see "Regenerating the images")

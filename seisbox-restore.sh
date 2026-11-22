@@ -63,6 +63,8 @@ grep -qs 'seisbox.bashrc' "$HOME/.bashrc" || \
 install -m 755 "$R/termux/bin/seislive" "$PREFIX/bin/seislive"
 install -m 755 "$R/termux/bin/Events" "$PREFIX/bin/Events"; ln -sf Events "$PREFIX/bin/events"
 install -m 755 "$R/termux/bin/quakemt" "$PREFIX/bin/quakemt"
+install -m 755 "$R/termux/bin/seisview" "$PREFIX/bin/seisview"
+install -m 755 "$R/ubuntu/imgview.py" "$FILES/usr/var/lib/proot-distro/containers/ubuntu/rootfs/root/geo/bin/imgview"
 install -m 755 "$R/ubuntu/quakemt.py" "$FILES/usr/var/lib/proot-distro/containers/ubuntu/rootfs/root/geo/bin/quakemt"
 if [ -f "$B/termux.properties" ] && [ ! -f "$HOME/.termux/termux.properties" ]; then
   mkdir -p "$HOME/.termux"; cp "$B/termux.properties" "$HOME/.termux/"

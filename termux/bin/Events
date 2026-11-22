@@ -218,6 +218,21 @@ def matches(ev, country, minmag):
     return False
 
 
+def safe_name(text):
+    """Folder-safe ASCII name (same rule as quakemt)."""
+    import re
+    import unicodedata
+    t = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    t = re.sub(r"(\d)\s+km\b", r"\1km", t)
+    return re.sub(r"[^A-Za-z0-9.+-]+", "-", t).strip("-")[:60]
+
+
+def folder_name(e):
+    """e.g. 2026-11-21_0942UTC_M6.8_Banda-Sea"""
+    mag = 0 if math.isnan(e.mag) else e.mag
+    return f"{e.time:%Y-%m-%d_%H%M}UTC_M{mag:.1f}_" + safe_name(e.region or "event")
+
+
 def ago(t):
     s = (datetime.now(timezone.utc) - t).total_seconds()
     if s < 3600:
@@ -494,7 +509,10 @@ class App:
     def mechanism(self, e, invert):
         """Leave the TUI, run quakemt in geo (Ubuntu), then come back."""
         proj = os.environ.get("SEISBOX_PROJECTS", "/sdcard/termux/projects")
-        outdir = f"{proj}/mt/{e.time:%Y%m%d_%H%M%S}_M{e.mag:.1f}"
+        default = folder_name(e)
+        name = self.prompt("Folder: ", f"Saved in {proj}/mt/  ·  Enter = {default}")
+        name = safe_name(name) if name else default
+        outdir = f"{proj}/mt/{name}"
         cmd = ["proot-distro", "login", "ubuntu", "--", "env", f"SEISBOX_PROJECTS={proj}",
                "/root/geo/bin/quakemt", "--time", e.time.strftime("%Y-%m-%dT%H:%M:%S.%f"),
                "--lat", str(e.lat), "--lon", str(e.lon),
@@ -511,14 +529,21 @@ class App:
             print("proot-distro not found — quakemt needs the SEISBOX Ubuntu/geo setup.")
         while True:
             try:
-                ans = input("\n[o] open beachball image  [w] open waveform fits  "
+                ans = input("\n[o] mechanism image  [w] waveform fits  (open in Termux:X11)   "
                             "[Enter] back to Events: ").strip().lower()
             except EOFError:
                 ans = ""
             if ans in ("o", "w"):
-                f = f"{outdir}/{'report' if ans == 'o' else 'fits'}.png"
+                if ans == "w":
+                    f = f"{outdir}/inversion_waveform_fits.png"
+                else:
+                    f = f"{outdir}/inversion_mechanism.png"
+                    if not invert or not os.path.exists(f):
+                        f = f"{outdir}/published_mechanisms.png"
                 if os.path.exists(f):
-                    subprocess.call(["termux-open", f], stderr=subprocess.DEVNULL)
+                    subprocess.call(["seisview", f])
+                elif ans == "w":
+                    print("No waveform fits: they exist only after F (own inversion).")
                 else:
                     print("not found:", f)
                 continue

@@ -1,0 +1,21 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# seisview: open image(s) in the Termux:X11 app (zoom/pan toolbar; q = close, ←/→ = next image).
+#   seisview /sdcard/termux/projects/mt/<folder>/inversion_mechanism.png
+#   seisview /sdcard/termux/projects/mt/<folder>/*.png
+# Runs in the background, so the Termux terminal stays usable.
+[ $# -gt 0 ] || { echo "usage: seisview IMAGE.png [more.png ...]"; exit 1; }
+files=()
+for f in "$@"; do
+  [ -f "$f" ] || { echo "seisview: not found: $f"; exit 1; }
+  files+=("$(readlink -f "$f")")
+done
+export XDG_RUNTIME_DIR=$PREFIX/tmp
+if [ ! -S "$PREFIX/tmp/.X11-unix/X0" ] || ! pgrep -f "com.termux.x11 :0" >/dev/null; then
+  setsid nohup termux-x11 :0 >"$PREFIX/tmp/x11.log" 2>&1 </dev/null &
+  for i in $(seq 1 20); do [ -S "$PREFIX/tmp/.X11-unix/X0" ] && break; sleep 0.5; done
+fi
+am start -n com.termux.x11/.MainActivity >/dev/null 2>&1
+setsid nohup proot-distro login ubuntu --shared-tmp -- \
+  env DISPLAY=:0 ${IMGVIEW_TIMEOUT:+IMGVIEW_TIMEOUT=$IMGVIEW_TIMEOUT} /root/geo/bin/imgview "${files[@]}" \
+  >"$PREFIX/tmp/seisview.log" 2>&1 </dev/null &
+echo "Opened in Termux:X11 → switch to the Termux:X11 app (q closes the image)."
