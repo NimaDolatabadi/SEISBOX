@@ -63,7 +63,8 @@ tar -c -C "$CONTAINERS" --owner=0 --group=0 --numeric-owner \
   --exclude='ubuntu/rootfs/var/cache/apt/*.bin' \
   --exclude='ubuntu/rootfs/var/cache/apt/archives/*.deb' \
   --exclude='ubuntu/rootfs/var/log/?*' \
-  ubuntu | "$GZ" > "$OUT/ubuntu.tar.gz"
+  ubuntu/manifest.json ubuntu/rootfs | "$GZ" > "$OUT/ubuntu.tar.gz"
+# (no bare "ubuntu/" entry: proot-distro restore rejects archives that have one)
 
 say "4/5  SEISBOX repo + restore script"
 if git -C "$REPO" rev-parse HEAD >/dev/null 2>&1; then

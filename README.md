@@ -25,7 +25,7 @@ seislive IU.ANMO.00.BHZ --filter 0.5 5   # live waveforms from EarthScope SeedLi
 6. [Plotting: terminal, X11 windows, files](#6-plotting)
 7. [Included tools](#7-included-tools)
 8. [Repository layout](#8-repository-layout)
-9. [Updating, backup, uninstall](#9-updating-backup-uninstall)
+9. [Updating, backup, uninstall, offline bundle](#9-updating-backup-uninstall)
 10. [Troubleshooting](#10-troubleshooting)
 
 ---
@@ -345,7 +345,9 @@ Termux in the foreground (or use **Acquire wakelock**).
 
 ```
 SEISBOX/
-├── install.sh                  # run in Termux: does everything
+├── install.sh                  # run in Termux: does everything (online)
+├── seisbox-pack.sh             # make an offline bundle of this phone's setup
+├── seisbox-restore.sh          # install that bundle on another phone
 ├── requirements-lock.txt       # exact tested versions (default)
 ├── requirements.txt            # main packages, unpinned (SEISBOX_PY=latest)
 ├── ubuntu/
@@ -377,6 +379,43 @@ SEISBOX/
 proot-distro backup ubuntu --output /sdcard/seisbox-ubuntu.tar.gz
 proot-distro restore /sdcard/seisbox-ubuntu.tar.gz
 ```
+
+### Offline bundle: copy your setup to other phones
+
+No internet or compiling is needed on the other phone. Make the bundle on a phone where SEISBOX
+already works:
+
+```bash
+bash ~/SEISBOX/seisbox-pack.sh            # → /sdcard/SEISBOX-bundle/  (~2–3 GB, 10–30 min)
+```
+
+The bundle folder contains:
+
+| File | What |
+|---|---|
+| `Termux.apk`, `Termux-X11.apk`, `Termux-API.apk` | The apps, copied from your phone |
+| `termux-prefix.tar.gz` | All Termux packages |
+| `ubuntu.tar.gz` | Ubuntu 24.04 + the whole `geo` Python environment |
+| `seisbox-repo.tar.gz` | This repo (shortcuts, welcome screen, projects) |
+| `seisbox-restore.sh`, `README.txt`, `SHA256SUMS` | Installer, instructions, checksums |
+
+These are **not** included: your Termux home folder, shell histories, pip caches,
+Claude Code data and logins, SSH host keys (new ones are generated), temp files and logs.
+
+Copy the folder to the new phone (USB cable, SD card, Google Drive, …), then on that phone:
+
+1. Install `Termux.apk` (and `Termux-X11.apk`). Uninstall any Termux from Google Play first.
+2. Open Termux and wait until the first setup finishes.
+3. `termux-setup-storage` → **Allow**
+4. `bash /sdcard/SEISBOX-bundle/seisbox-restore.sh`
+5. Close and reopen Termux, then type `geo`.
+
+The new phone must be 64-bit ARM (aarch64) and have about 6 GB free. The restore replaces that
+phone's Termux packages and Ubuntu container. Its Termux home folder is kept.
+
+The bundle is too large for git. Share it as a file, or attach it to a GitHub Release
+(files must be < 2 GB each: `split -b 1900M ubuntu.tar.gz ubuntu.tar.gz.part-`, and
+rejoin with `cat ubuntu.tar.gz.part-* > ubuntu.tar.gz`).
 
 **Rebuild just the venv**:
 
