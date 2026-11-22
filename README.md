@@ -315,6 +315,7 @@ Events                         # last 3 days, M≥4, all sources
 Events -m 5 -c japan           # start with filters
 Events -s emsc -d 7 -c iran    # one source, 7 days
 Events --list -m 4.5 -c chile  # plain table instead of the TUI (for scripts / piping)
+Events --live                  # start in live mode (30 s); Events --live 15 for every 15 s
 ```
 
 | Key | Action |
@@ -326,12 +327,16 @@ Events --list -m 4.5 -c chile  # plain table instead of the TUI (for scripts / p
 | `m` | minimum magnitude |
 | `c` or `/` | country/region filter. Text is matched against the region name; commas mean OR (`japan,chile`). `usa` also matches US states and `, CA` |
 | `d` | time window: 1 → 3 → 7 → 30 days |
-| `r` | reload (it also refreshes itself every 5 minutes) |
+| `r` | reload now (it also refreshes itself every 5 minutes) |
+| `l` | **live mode** on/off: reloads every 30 s with a countdown in the header. Quakes that arrive while you watch get a green `●` for 10 minutes, and the phone beeps |
 | `?` / `q` | help / quit |
 
 Magnitudes are coloured: yellow ≥ 4, red ≥ 5, inverted red ≥ 6. Each service returns at most
 1000 events. With a low magnitude and a long window, the bottom bar warns that older events are
 cut off. Raise the magnitude or shorten the window.
+
+USGS and EMSC usually answer in under a second, while GFZ can take 5–10 s. The list fills in as each
+service answers, and a service that fails keeps its previous results on screen.
 
 ### `irsc_bulletin`: Iranian Seismological Center catalogue
 

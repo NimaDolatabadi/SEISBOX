@@ -18,8 +18,9 @@ Keys (TUI):
   s  source (All/USGS/EMSC/GFZ)           m  minimum magnitude
   c  country/region text filter           d  time window (1/3/7/30 days)
   r  refresh now                          o  open selected quake's web page
+  l  live mode on/off (refresh every 30 s, new quakes marked ● + beep)
   ?  help                                 q  quit
-Auto-refreshes every 5 minutes.
+Auto-refreshes every 5 minutes; in live mode every 30 s (Events --live 15 for 15 s).
 
 Uses only the Python standard library (runs on Termux's own python).
 """
@@ -33,7 +34,8 @@ import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from concurrent.futures import as_completed
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 
 SOURCES = {
@@ -44,6 +46,8 @@ SOURCES = {
 SOURCE_CYCLE = ["All", "USGS", "EMSC", "GFZ"]
 DAYS_CYCLE = [1, 3, 7, 30]
 REFRESH_SEC = 300
+LIVE_SEC = 30          # default live-mode interval
+NEW_SEC = 600          # how long a newly arrived quake stays marked ●
 HELP = """EVENTS — keys
 ↑ ↓  PgUp PgDn  Home End   move
 Enter   details + ObsPy waveform snippet
@@ -55,6 +59,8 @@ c or /  country/region filter
           (empty = everything)
 d       days: 1 → 3 → 7 → 30
 r       reload now (auto every 5 min)
+l       LIVE mode on/off: reload every 30 s,
+          new quakes get a green ● and a beep
 q       quit
 
 Mag colours: yellow ≥4  red ≥5  inverted ≥6
@@ -85,6 +91,11 @@ class Event:
     source: str
     evid: str
     also: list = field(default_factory=list)   # other agencies reporting it
+    also_ids: list = field(default_factory=list)
+
+    @property
+    def keys(self):
+        return [(self.source, self.evid)] + self.also_ids
 
     @property
     def url(self):
@@ -149,7 +160,8 @@ def _dist_deg(a, b):
 def merge(lists):
     """Combine sources; same quake (≤60 s, ≤1.5°) reported twice is shown once."""
     order = {"USGS": 0, "EMSC": 1, "GFZ": 2}
-    allev = sorted((e for l in lists for e in l), key=lambda e: (e.time, order[e.source]))
+    allev = sorted((replace(e, also=[], also_ids=[]) for l in lists for e in l),
+                   key=lambda e: (e.time, order[e.source]))
     kept = []
     for e in allev:
         dup = None
@@ -161,9 +173,16 @@ def merge(lists):
                 break
         if dup:
             dup.also.append(e.source)
+            dup.also_ids.append((e.source, e.evid))
         else:
             kept.append(e)
     return sorted(kept, key=lambda e: e.time, reverse=True)
+
+
+def limit_note(name, evs):
+    """Server cap reached: older events in the time window are missing."""
+    span = (evs[0].time - evs[-1].time).total_seconds() / 3600 if evs else 0
+    return f"{name}: newest {LIMIT} only (~{span:.0f}h), raise mag"
 
 
 def load(source, days, minmag):
@@ -175,9 +194,8 @@ def load(source, days, minmag):
             try:
                 r = f.result()
                 results.append(r)
-                if len(r) >= LIMIT:     # server cap: older events in the window are missing
-                    span = (r[0].time - r[-1].time).total_seconds() / 3600 if r else 0
-                    errors.append(f"{n}: newest {LIMIT} only (~{span:.0f}h), raise mag")
+                if len(r) >= LIMIT:
+                    errors.append(limit_note(n, r))
             except Exception as e:      # network/server problem: keep the others
                 errors.append(f"{n}: {e.__class__.__name__}")
     return merge(results), errors
@@ -229,6 +247,14 @@ class App:
         self.updated = None
         self.msg = ""
         self.lock = threading.Lock()
+        self.live = args.live is not None
+        self.live_sec = max(5, int(args.live or LIVE_SEC))
+        self.last_refresh = 0.0
+        self.seen = {}            # (source, id) -> time first seen (0 = was there at start)
+        self.baseline = True      # first load after start / filter change: nothing is "new"
+        self.beep = False
+        self.gen = 0              # bumps on every reload; stale downloads are discarded
+        self.by_src = {}          # newest result per source, kept while others still load
         curses.curs_set(0)
         curses.use_default_colors()
         for i, c in enumerate([curses.COLOR_CYAN, curses.COLOR_YELLOW, curses.COLOR_RED,
@@ -239,23 +265,79 @@ class App:
         scr.keypad(True)
 
     # -- data
-    def refresh_data(self):
-        if self.loading:
+    def refresh_data(self, force=False):
+        """Reload in the background. Each source updates the list as soon as it
+        answers (GFZ is often 5-10 s slower than USGS/EMSC)."""
+        if self.loading and not force:
             return
-        self.loading = True
+        self.gen += 1
+        gen, self.loading = self.gen, True
         src, days, mm = self.source, self.days, self.minmag
+        names = list(SOURCES) if src == "All" else [src]
 
         def work():
-            evs, errs = load(src, days, mm)
+            errs = []
+            with ThreadPoolExecutor(len(names)) as ex:
+                futs = {ex.submit(fetch, n, days, mm): n for n in names}
+                for f in as_completed(futs):
+                    n = futs[f]
+                    try:
+                        r = f.result()
+                        if len(r) >= LIMIT:
+                            errs.append(limit_note(n, r))
+                    except Exception as e:      # keep this source's previous data
+                        r = None
+                        errs.append(f"{n}: {e.__class__.__name__}")
+                    with self.lock:
+                        if gen != self.gen:     # user changed settings meanwhile
+                            return
+                        if r is not None:
+                            self.by_src[n] = r
+                        self.errors = list(errs)
+                        self.update_events(names)
             with self.lock:
-                self.events, self.errors = evs, errs
-                self.updated = datetime.now(timezone.utc)
-                self.loading = False
-                self.apply_filter()
+                if gen == self.gen:
+                    self.baseline = False
+                    self.loading = False
+                    self.updated = datetime.now(timezone.utc)
+                    self.last_refresh = time.time()   # live interval counts from here
         threading.Thread(target=work, daemon=True).start()
 
+    def update_events(self, names):
+        evs = merge([self.by_src[n] for n in names if n in self.by_src])
+        now, fresh = time.time(), 0
+        for e in evs:
+            known = [self.seen[k] for k in e.keys if k in self.seen]
+            if known:                       # same quake, maybe more agencies now
+                t = 0.0 if 0.0 in known else min(known)
+            else:                           # never seen under any agency's id
+                t = 0.0 if self.baseline else now
+                if t and matches(e, self.country, self.minmag):
+                    fresh += 1
+            for k in e.keys:
+                self.seen.setdefault(k, t)
+        if fresh:
+            self.msg = f"● {fresh} new quake{'s' if fresh > 1 else ''}"
+            self.beep = self.live
+        self.events = evs
+        self.apply_filter()
+
+    def reset_new(self):
+        """Source/window/magnitude changed: don't flag the reloaded list as new."""
+        self.seen.clear(); self.baseline = True; self.by_src.clear()
+
+    def is_new(self, e):
+        ts = [self.seen.get(k, 0.0) for k in e.keys]
+        return all(t > 0 for t in ts) and time.time() - min(ts) < NEW_SEC
+
     def apply_filter(self):
+        cur = self.view[self.sel].keys[0] if 0 <= self.sel < len(self.view) else None
         self.view = [e for e in self.events if matches(e, self.country, self.minmag)]
+        if cur and self.sel > 0:
+            for i, e in enumerate(self.view):
+                if cur in e.keys:
+                    self.sel = i
+                    break
         self.sel = min(self.sel, max(0, len(self.view) - 1))
 
     # -- drawing helpers
@@ -283,9 +365,16 @@ class App:
         bar = curses.color_pair(6) | curses.A_BOLD
         self.put(0, 0, " " * w, bar)
         self.put(0, 0, " EVENTS · latest earthquakes", bar)
-        status = "loading…" if self.loading else (f"{len(self.view)} ev · {self.updated:%H:%M} UTC"
+        status = ("updating…" if self.view else "loading…") if self.loading else (f"{len(self.view)} ev · {self.updated:{'%H:%M:%S' if self.live else '%H:%M'}} UTC"
                                                    if self.updated else "")
+        if self.live:
+            left = max(0, int(self.live_sec - (time.time() - self.last_refresh)))
+            live = f"● LIVE {left:2d}s "
+            status = live + ("· " + status if w >= 64 or self.loading else "")
         self.put(0, max(0, w - len(status) - 1), status, bar)
+        if self.live:
+            self.put(0, max(0, w - len(status) - 1), "●",
+                     curses.color_pair(6) | curses.A_BOLD | (curses.A_BLINK if self.loading else 0))
         filt = (f" Src:{self.source}  M≥{self.minmag:g}  {self.days}d  "
                 f"Region:{self.country or 'any'}")
         self.put(1, 0, filt, curses.color_pair(1))
@@ -317,14 +406,18 @@ class App:
                 self.put(y, 0, left, sel)
                 self.put(y, len(left), mag, self.magattr(e.mag) | sel)
                 self.put(y, len(left) + 4, f" {dep} {e.region}".ljust(w), sel)
+            if self.is_new(e):
+                self.put(y, 0, "●", curses.color_pair(5) | curses.A_BOLD | sel)
         if not self.view and not self.loading:
             self.put(4, 2, "No events match. Try a lower magnitude (m), longer window (d)")
             self.put(5, 2, "or clear the region filter (c, then Enter on empty).")
 
         foot = self.msg or ("! " + "; ".join(self.errors) if self.errors else
-                            ("↑↓ Enter:info s:src m:mag c:region d:days r:reload o:web ?:help q:quit"
-                             if w >= 75 else "Enter:info s:src m:mag c:region d:days ?:help q"))
-        self.put(h - 1, 0, foot.ljust(w), curses.color_pair(2 if self.errors and not self.msg else 1))
+                            ("↑↓ Enter:info s:src m:mag c:region d:days r:reload l:live o:web ?:help q:quit"
+                             if w >= 82 else "Enter:info s m c d r:reload l:live ?:help q"))
+        fattr = (curses.color_pair(5) | curses.A_BOLD if self.msg.startswith("●") else
+                 curses.color_pair(2 if self.errors and not self.msg else 1))
+        self.put(h - 1, 0, foot.ljust(w), fattr)
         s.refresh()
 
     def prompt(self, label, hint="", default=""):
@@ -399,14 +492,16 @@ class App:
 
     def run(self):
         self.refresh_data()
-        last = time.time()
         while True:
             with self.lock:
                 self.draw()
+                beep, self.beep = self.beep, False
+            if beep:
+                curses.beep()
             k = self.scr.getch()
             if k == -1:
-                if time.time() - last > REFRESH_SEC:
-                    last = time.time(); self.refresh_data()
+                if time.time() - self.last_refresh > (self.live_sec if self.live else REFRESH_SEC):
+                    self.refresh_data()
                 continue
             self.msg = ""
             n = len(self.view)
@@ -431,11 +526,11 @@ class App:
                 self.open_url(self.view[self.sel])
             elif k in (ord("s"), ord("S")):
                 self.source = SOURCE_CYCLE[(SOURCE_CYCLE.index(self.source) + 1) % len(SOURCE_CYCLE)]
-                self.sel = 0; last = time.time(); self.refresh_data()
+                self.sel = 0; self.reset_new(); self.refresh_data(force=True)
             elif k in (ord("d"), ord("D")):
                 i = DAYS_CYCLE.index(self.days) if self.days in DAYS_CYCLE else -1
                 self.days = DAYS_CYCLE[(i + 1) % len(DAYS_CYCLE)]
-                self.sel = 0; last = time.time(); self.refresh_data()
+                self.sel = 0; self.reset_new(); self.refresh_data(force=True)
             elif k in (ord("m"), ord("M")):
                 v = self.prompt(f"Min magnitude [{self.minmag:g}]: ", "e.g. 2.5, 4, 6   (Enter on empty = keep)")
                 if v:
@@ -444,7 +539,7 @@ class App:
                         refetch = new < self.minmag     # lower → need more data
                         self.minmag = new; self.sel = 0
                         if refetch:
-                            last = time.time(); self.refresh_data()
+                            self.reset_new(); self.refresh_data(force=True)
                         else:
                             self.apply_filter()
                     except ValueError:
@@ -453,7 +548,13 @@ class App:
                 v = self.prompt("Region: ", "e.g. iran   japan,chile   usa   (Enter on empty = all)")
                 self.country = v; self.sel = 0; self.apply_filter()
             elif k in (ord("r"), ord("R")):
-                last = time.time(); self.refresh_data()
+                self.refresh_data()
+            elif k in (ord("l"), ord("L")):
+                self.live = not self.live
+                self.msg = (f"Live ON: reload every {self.live_sec} s, new quakes marked ●"
+                            if self.live else "Live OFF: reload every 5 min (r = now)")
+                if self.live:
+                    self.refresh_data()
             elif k == ord("?"):
                 self.popup(HELP)
 
@@ -466,6 +567,8 @@ def main():
     p.add_argument("--country", "-c", default="", help="country/region text, comma = OR")
     p.add_argument("--days", "-d", type=int, default=3, help="time window in days (default 3)")
     p.add_argument("--list", "-l", action="store_true", help="print a table instead of the TUI")
+    p.add_argument("--live", nargs="?", type=int, const=LIVE_SEC, metavar="SEC",
+                   help=f"start in live mode, reload every SEC seconds (default {LIVE_SEC})")
     args = p.parse_args()
     if args.list or not sys.stdout.isatty():
         print_list(args)
