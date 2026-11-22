@@ -16,8 +16,19 @@ apt-get install -y \
   libgdal-dev gdal-bin \
   chafa x11-utils
 
-echo "--> venv $VENV"
-[ -x "$VENV/bin/python" ] || python3 -m venv "$VENV"
+# The lock file is tested with Python 3.12 (Ubuntu 24.04's python3). Newer Ubuntu releases
+# ship a newer Python (26.04: 3.14), so fetch a standalone Python 3.12 with uv there.
+PY=python3
+if ! python3 -c 'import sys; sys.exit(sys.version_info[:2] != (3, 12))'; then
+  echo "--> system Python is $(python3 -V 2>&1 | cut -d' ' -f2); installing Python 3.12 with uv"
+  # uv from PyPI in its own small venv (no installer script piped into a shell)
+  [ -x /opt/uv/bin/uv ] || { python3 -m venv /opt/uv && /opt/uv/bin/pip install -q uv; }
+  /opt/uv/bin/uv python install 3.12
+  PY="$(/opt/uv/bin/uv python find 3.12)"
+fi
+
+echo "--> venv $VENV (Python $("$PY" -V 2>&1 | cut -d' ' -f2))"
+[ -x "$VENV/bin/python" ] || "$PY" -m venv "$VENV"
 # setuptools<81: MSNoise 1.6 still imports pkg_resources (removed in 81)
 "$VENV/bin/pip" install -U pip "setuptools<81" wheel
 
