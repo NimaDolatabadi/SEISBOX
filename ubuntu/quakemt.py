@@ -52,6 +52,11 @@ MODEL = "prem_a_10s"                    # Syngine/AxiSEM database (18000 s long)
 VR_MIN = 35.0                           # below this the mechanism is not reported (issue #3)
 DT = 2.0                                # common sampling interval for the inversion (s)
 PAD = 600.0                             # seconds of padding before origin
+SNR_MIN = 3.0                           # trace kept if its strongest arrival is this far above noise
+SNR_FULL = 10.0                         # traces at or above this SNR get full weight (issue #16)
+AMP_OUTLIER = 10.0                      # station amplitude off the median by more than this: bad metadata
+                                        # (site amplification reaches 3-5x; tested 5x dropped good stations)
+TRACE_W = {}                            # (station, comp) -> SNR weight, set per inversion
 # regional mode (M4-5.5): local/regional broadband stations, continental 1-D model
 REG_MODEL = "ak135f_5s"                 # Syngine DB with a 35 km continental crust, >= 5 s
 REG_DT = 1.0
@@ -374,6 +379,15 @@ def download_data(ev, stations, t_end, band, n):
             for s in stations]
     st = rc.get_waveforms_bulk(bulk)
     inv = rc.get_stations_bulk(bulk, level="response")
+    # issue #19: the federator sometimes returns metadata for only part of the request (Aladag M4.7:
+    # 27 stations lost with "No matching response information"); ask again for the missing ones
+    missing = [b for b in bulk if len(st.select(network=b[0], station=b[1]))
+               and not len(inv.select(network=b[0], station=b[1]))]
+    if missing:
+        try:
+            inv += rc.get_stations_bulk(missing, level="response")
+        except Exception as e:
+            detail(f"    metadata retry for {len(missing)} stations failed: {str(e)[:60]}")
     data = {}
     for s in stations:
         loc, comps = pick_location(st, s["net"], s["sta"], s.get("cha", "LH?"))
@@ -555,7 +569,9 @@ def build_system(keys, data, g, win, shift_s, lags=None):
         d = data[key][c][i0:i1]
         G6 = np.array([gi[i0 - k:i1 - k] for gi in g[key][c]]).T / UNIT
         G5 = np.column_stack([G6[:, 0] - G6[:, 2], G6[:, 1] - G6[:, 2], G6[:, 3], G6[:, 4], G6[:, 5]])
-        w = 1.0 / (np.abs(d).max() or 1.0)                # every trace counts equally
+        # normalised to its own peak, then down-weighted by SNR (issue #16: noisy traces
+        # used to count as much as clean ones)
+        w = TRACE_W.get((key, c), 1.0) / (np.abs(d).max() or 1.0)
         idx.append((key, c, 0, len(d)))
         rows_d.append(d * w)
         rows_G.append(G5 * w)
@@ -685,6 +701,25 @@ def trace_vr(sol):
     return out
 
 
+def amp_outliers(sol):
+    """Stations whose data/synthetic amplitude ratio is off the median of all stations by more
+    than AMP_OUTLIER (issue #16). Typically a wrong gain in the response metadata (Greece M4.2:
+    HT.KAVA came out 100x too small, issue #19). Every trace is normalised to its own peak, so one such
+    station dominates the fit and drags Mw down by a unit. The median is robust even when the
+    first solution is already distorted by it. Returns {station: ratio relative to the median}."""
+    num, den, pos = {}, {}, 0
+    for key, c, _, n in sol["idx"]:
+        d, y = sol["d"][pos:pos + n], sol["syn"][pos:pos + n]
+        num[key] = num.get(key, 0.0) + d @ d
+        den[key] = den.get(key, 0.0) + y @ y
+        pos += n
+    lr = {k: 0.5 * math.log10(num[k] / den[k]) for k in num if den[k] > 0 and num[k] > 0}
+    if len(lr) < 4:
+        return {}
+    med = float(np.median(list(lr.values())))
+    return {k: 10 ** (v - med) for k, v in lr.items() if abs(v - med) > math.log10(AMP_OUTLIER)}
+
+
 def invert(ev, args, outdir, regional=False):
     global DT, PAD
     DT, PAD = (REG_DT, REG_PAD) if regional else (2.0, 600.0)
@@ -756,8 +791,11 @@ def invert(ev, args, outdir, regional=False):
     data = {s_key: expand(raw, next(s["dist"] for s in stations if f"{s['net']}.{s['sta']}" == s_key),
                           band, bband, use_body) for s_key, raw in data.items()}
 
-    # signal-to-noise check per component and band
+    # signal-to-noise check per component and band. Signal = rms over the strongest stretch of
+    # one longest period (issue #16: the rms over the whole long window diluted short arrivals)
     keys = []
+    TRACE_W.clear()
+    nseg = max(3, int(round(band[1] / DT)))
     for s in stations:
         key = f"{s['net']}.{s['sta']}"
         for c in data[key]:
@@ -766,9 +804,13 @@ def invert(ev, args, outdir, regional=False):
             i0, i1, n0 = win[(key, c)]
             x = data[key][c]
             noise = np.sqrt(np.mean(x[max(0, n0):i0] ** 2)) if i0 - max(0, n0) > 20 else 0
-            sig = np.sqrt(np.mean(x[i0:i1] ** 2))
-            if sig > 0 and (noise == 0 or sig / noise > 3):
+            p = x[i0:i1] ** 2
+            sig = (np.sqrt(np.convolve(p, np.ones(nseg) / nseg, "valid").max()) if len(p) >= nseg
+                   else np.sqrt(np.mean(p)) if len(p) else 0.0)
+            snr = sig / noise if noise > 0 else np.inf
+            if sig > 0 and snr > SNR_MIN:
                 keys.append((key, c))
+                TRACE_W[(key, c)] = min(1.0, snr / SNR_FULL)
 
     # Below M6 the long-period waveforms are too noisy / too model-dependent; body waves
     # alone solved M5.4-5.9 quakes that full waveforms could not (issue #3: Peru M5.9
@@ -779,7 +821,7 @@ def invert(ev, args, outdir, regional=False):
         detail("  using body waves only (below M6)")
     nsta_clear = len({k for k, _ in keys})
     nbody = sum(1 for _, c in keys if c in BODY_COMPS)
-    detail(f"  traces with clear signal (SNR > 3): {len(keys)} ({nbody} body-wave) from {nsta_clear} stations")
+    detail(f"  traces with clear signal (SNR > {SNR_MIN:.0f}): {len(keys)} ({nbody} body-wave) from {nsta_clear} stations")
     if len(keys) < (6 if regional else 8) or nsta_clear < (3 if regional else 4):
         why = (f" A bigger quake (M{bigger[0][1]:.1f} {bigger[0][2]}) happened {bigger[0][0]:.0f} min "
                "before; its surface waves are probably masking this one." if bigger else
@@ -826,7 +868,16 @@ def invert(ev, args, outdir, regional=False):
             sol = solve_fixed(use, data, gcache[dep], win, shifts, ref_lags)
         else:
             sol = solve(use, data, gcache[dep], win, shifts, maxlag=maxlag)
-            ref_lags = ref_lags if ref_lags is not None else sol["lags"]
+            bad = amp_outliers(sol)
+            left = [k for k in use if k[0] not in bad]
+            if bad and len(left) >= (6 if regional else 8) and len({k for k, _ in left}) >= (3 if regional else 4):
+                for k, r in sorted(bad.items()):
+                    detail(f"    drop {k}: amplitude {r:.2g}x the median data/synthetic ratio "
+                           "(wrong gain in its metadata?)")
+                keys = [k for k in keys if k[0] not in bad]
+                use = left
+                sol = solve(use, data, gcache[dep], win, shifts, maxlag=maxlag)
+            ref_lags = sol["lags"]
         # quality control: drop traces the model cannot fit at all, solve again
         tv = trace_vr(sol)
         good = [k for k in use if tv[k] > -20]
