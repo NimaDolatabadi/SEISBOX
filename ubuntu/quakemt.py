@@ -60,8 +60,11 @@ REG_DMIN, REG_DMAX = 0.7, 8.0           # deg (~80-900 km): beyond near field, b
 REG_DMAX_WIDE = 12.0                    # fallback when fewer than 8 stations within REG_DMAX
 REG_GAP_WARN = 180.0                    # azimuthal gap above which a regional result is shaky
 REG_BAND_WIDE = (25.0, 60.0)            # widened (>8 deg) paths: longer periods see less of the 3-D crust
-REG_T_OFFSET = 10.0                     # s; best centroid shift was +9-10 s on every regional test
-REG_T_HALF = 6.0                        # (Syngine ak135f_5s time reference); search offset +- this
+# Regional delays grow with distance (issue #17): real crust is slower than ak135 (no sediments).
+# Pinnacles M5.0, 160-800 km: Rayleigh +2.9 s/100 km, Love +2.0 s/100 km, ~0 s at the source.
+# So a common moveout (s per 100 km) is fitted with a small origin shift, then station lags.
+REG_MOVEOUT_RATES = (0.0, 1.0, 2.0, 3.0, 4.0, 5.0)  # s per 100 km, grid searched with the waveform fit
+REG_SHIFTS = (-4.0, 6.0)                   # s, common origin/centroid shift
 REG_VR_MIN = 20.0                       # regional: below this refuse; REG_VR_MIN..VR_MIN = low confidence
 REG_VR_OK = 40.0                        # regional: at or above this (and decent coverage) not "low confidence"
 REG_CHANNELS = ("BH", "HH")             # broadband, preferred in this order
@@ -631,16 +634,24 @@ def jackknife(best, data, g, win, units):
     return out
 
 
-def best_lags(keys, data, g, win, sol, maxlag):
-    """Per station and wave group: lag (s) that best aligns synthetic with data."""
+def moveout_lags(keys, dist_km, rate):
+    """Distance-proportional delay (s) per station and wave group for a moveout rate (s/100 km)."""
+    return {(key, lag_group(c)): rate * dist_km[key] / 100.0 for key, c in keys}
+
+
+def best_lags(keys, data, g, win, sol, maxlag, base=None):
+    """Per station and wave group: lag (s) that best aligns synthetic with data,
+    searched within +-maxlag around base (the moveout delay; regional mode)."""
     m = np.array(sol["m"])
+    base = base or {}
     groups = {}
     for key, c in keys:
         groups.setdefault((key, lag_group(c)), []).append(c)
     out = {}
     for (key, grp), comps in groups.items():
         nl = int((BODY_LAG if grp in ("P", "SH") else maxlag) / DT)
-        k0 = int(round(sol["shift"] / DT))
+        b = base.get((key, grp), 0.0)
+        k0 = int(round((sol["shift"] + b) / DT))
         best, bl = -np.inf, 0
         for L in range(-nl, nl + 1):
             num = den_s = 0.0
@@ -653,7 +664,7 @@ def best_lags(keys, data, g, win, sol, maxlag):
             cc = num / math.sqrt(den_s or 1)
             if cc > best:
                 best, bl = cc, L
-        out[(key, grp)] = bl * DT
+        out[(key, grp)] = b + bl * DT
     return out
 
 
@@ -662,16 +673,33 @@ def solve_fixed(keys, data, g, win, shifts, lags):
     return max((lsq(keys, data, g, win, sh, lags) for sh in shifts), key=lambda r: r["vr"])
 
 
-def solve(keys, data, g, win, shifts, maxlag=30.0, iters=4):
-    # 1) common centroid shift, no station lags
-    best = max((lsq(keys, data, g, win, sh, {}) for sh in shifts), key=lambda r: r["vr"])
-    # 2) iterate: align each station's Rayleigh/Love waves to the current model, re-solve
+def solve_lags(keys, data, g, win, shifts, maxlag, iters, base):
+    """Common shift with a fixed per-station base delay, then iterate per-station lags."""
+    best = max((lsq(keys, data, g, win, sh, base) for sh in shifts), key=lambda r: r["vr"])
+    # iterate: align each station's Rayleigh/Love waves to the current model, re-solve
     for _ in range(iters):
-        lags = best_lags(keys, data, g, win, best, maxlag)
+        lags = best_lags(keys, data, g, win, best, maxlag, base)
         new = lsq(keys, data, g, win, best["shift"], lags)
         if new["vr"] <= best["vr"] + 0.2:
             break
         best = new
+    return best
+
+
+def solve(keys, data, g, win, shifts, maxlag=30.0, iters=4, dist_km=None):
+    if dist_km is None:
+        best = solve_lags(keys, data, g, win, shifts, maxlag, iters, {})
+        best["moveout"] = None
+        return best
+    # regional (issue #17): grid over the moveout rate, each with its own shift and station
+    # lags (searched around the moveout delay, so they stay small and cannot skip a cycle)
+    best = None
+    for rate in REG_MOVEOUT_RATES:
+        r = solve_lags(keys, data, g, win, shifts, maxlag, iters, moveout_lags(keys, dist_km, rate))
+        r["moveout"] = float(rate)
+        detail(f"    moveout {rate:.1f} s/100km: VR {r['vr']:5.1f} %  shift {r['shift']:+.0f} s")
+        if best is None or r["vr"] > best["vr"]:
+            best = r
     return best
 
 
@@ -797,10 +825,10 @@ def invert(ev, args, outdir, regional=False):
         step = 10 if d0 < 70 else 20
         depths = sorted({max(5.0, d0 + k * step) for k in (-2, -1, 0, 1, 2)})
     dmin_depth = 2.0 if regional else 5.0
-    # regional: the best centroid shift came out at +9-10 s at all distances (Syngine ak135f_5s
-    # time reference). A wide grid let Greece M4.2 jump a cycle to +19 s (85 deg wrong), so
-    # search only around that offset (small quakes: centroid ~ origin time)
-    shifts = (np.arange(REG_T_OFFSET - REG_T_HALF, REG_T_OFFSET + REG_T_HALF + DT / 2, DT) if regional
+    # regional: small origin/centroid shift; the distance-dependent delay of the slow real crust
+    # is fitted separately as a moveout (issue #17). Before, a wide constant-shift grid let
+    # Greece M4.2 jump a cycle to +19 s (85 deg wrong).
+    shifts = (np.arange(REG_SHIFTS[0], REG_SHIFTS[1] + DT / 2, DT) if regional
               else np.arange(-10, 31, 2.0))
     use_dc = regional and not args.full_mt
     units = dc_units()[1] if use_dc else None
@@ -811,6 +839,8 @@ def invert(ev, args, outdir, regional=False):
     step = (depths[1] - depths[0]) if len(depths) > 1 else 10.0
     queue = sorted(depths, key=lambda d: abs(d - ev["depth"]))   # catalogue depth first
     ref_lags = None
+    ref_moveout = None
+    dist_km = {f"{s['net']}.{s['sta']}": s["dist"] * 111.19 for s in stations} if regional else None
     while queue:
         dep = queue.pop(0)
         progress(f"Green's functions + inversion at {dep:.0f} km depth "
@@ -825,23 +855,30 @@ def invert(ev, args, outdir, regional=False):
         if ref_lags is not None:
             sol = solve_fixed(use, data, gcache[dep], win, shifts, ref_lags)
         else:
-            sol = solve(use, data, gcache[dep], win, shifts, maxlag=maxlag)
+            sol = solve(use, data, gcache[dep], win, shifts, maxlag=maxlag, dist_km=dist_km)
+            ref_moveout = sol["moveout"]
             ref_lags = ref_lags if ref_lags is not None else sol["lags"]
         # quality control: drop traces the model cannot fit at all, solve again
         tv = trace_vr(sol)
         good = [k for k in use if tv[k] > -20]
         if len(good) >= (6 if regional else 8) and len(good) < len(use):
             sol = (solve_fixed(good, data, gcache[dep], win, shifts, ref_lags) if ref_lags is not None
-                   else solve(good, data, gcache[dep], win, shifts, maxlag=maxlag))
+                   else solve(good, data, gcache[dep], win, shifts, maxlag=maxlag, dist_km=dist_km))
+            if ref_lags is not None and sol.get("moveout") is None:
+                sol["moveout"] = ref_moveout
             use = good
+        sol.setdefault("moveout", ref_moveout)
         if use_dc:
             sol = to_dc(sol, units)
         sol.update(depth=dep, keys=use)
         results.append(sol)
-        lg = np.abs(list(sol["lags"].values())) if sol["lags"] else np.zeros(1)
+        mo = sol.get("moveout") or 0.0     # station lags reported relative to the moveout
+        lg = (np.abs([v - (mo * dist_km[k] / 100 if dist_km else 0.0) for (k, _), v in sol["lags"].items()])
+              if sol["lags"] else np.zeros(1))
         detail(f"    depth {dep:5.0f} km   VR {sol['vr']:5.1f} %"
                + (f" (free MT {sol['vr_free']:4.1f} %)" if use_dc else "") + f"   shift {sol['shift']:+.0f} s   "
-               f"station lags median {np.median(lg):.0f} s   traces {len(use)}")
+               + (f"moveout {sol['moveout']:.2f} s/100km   " if sol.get("moveout") is not None else "")
+               + f"station lags median {np.median(lg):.0f} s   traces {len(use)}")
         if not queue and len(results) < 9 and not args.depths:   # best at an edge -> extend
             done = sorted(r["depth"] for r in results)
             top = max(results, key=lambda r: r["vr"])["depth"]
@@ -908,7 +945,7 @@ def invert(ev, args, outdir, regional=False):
     props.update(agency="SEISBOX inversion", depth=best["depth"], vr=best["vr"], body=use_body,
                  shift=best["shift"], depth_range=(min(near), max(near)), ntraces=len(best["keys"]), nsta=len({k for k, _ in best["keys"]}),
                  gap=gap, band=band, model=model, mode="regional" if regional else "teleseismic",
-                 runtime=time.time() - t_start, uncertainty=unc,
+                 runtime=time.time() - t_start, uncertainty=unc, moveout=best.get("moveout"),
                  confidence="low" if reasons else "normal", low_reasons=reasons,
                  depth_curve=[(r["depth"], r["vr"]) for r in results])
     progress("")
@@ -1169,6 +1206,9 @@ def main():
                     print(f"  depth range {lo:.0f}-{hi:.0f} km (fits nearly as well)")
                 detail(f"  mode {mine['mode']}, model {mine['model']}, band "
                        f"{mine['band'][0]:.0f}-{mine['band'][1]:.0f} s")
+                if mine.get("moveout") is not None:
+                    detail(f"  moveout {mine['moveout']:.2f} s per 100 km (records arrive that much later "
+                           "than in ak135: slower real crust)")
                 detail(f"  centroid time shift {mine['shift']:+.0f} s   stations {mine['nsta']}  traces "
                        f"{mine['ntraces']}   azimuthal gap {mine['gap']:.0f}°   ({mine['runtime']:.0f} s)")
                 curve = "  ".join(f"{d:.0f}km:{v:.0f}%" for d, v in mine["depth_curve"])
