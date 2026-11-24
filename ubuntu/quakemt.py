@@ -10,6 +10,12 @@ Layer 2  own fast inversion (--invert, ~2-5 min):
          functions with IRIS Syngine (AxiSEM, PREM), and solves a deviatoric
          moment tensor by least squares with a grid search over centroid depth and
          time shift. Long-period (40-100 s) full waveforms: Mw >= ~5.5 at 25-90 deg.
+         Below M5.5 (or --mode regional): regional mode for M4+. Broadband BH/HH
+         stations 0.7-8 deg away (all networks; 12 deg if sparse), full 3-component
+         waveforms at 10-30 s (M<4.5), 15-40 s, 20-50 s (M4.8+), Green's functions from
+         Syngine ak135f_5s (continental crust), CAP-style per-station lags, pure
+         double couple by grid search, uncertainty (mechanism spread + station
+         jackknife); VR 20-40 % is reported as low confidence, below 20 % refused.
 
 Usage
   quakemt --time 2026-11-21T09:42:07 --lat -7.62 --lon 127.39 --depth 116 --mag 6.8
@@ -46,6 +52,20 @@ MODEL = "prem_a_10s"                    # Syngine/AxiSEM database (18000 s long)
 VR_MIN = 35.0                           # below this the mechanism is not reported (issue #3)
 DT = 2.0                                # common sampling interval for the inversion (s)
 PAD = 600.0                             # seconds of padding before origin
+# regional mode (M4-5.5): local/regional broadband stations, continental 1-D model
+REG_MODEL = "ak135f_5s"                 # Syngine DB with a 35 km continental crust, >= 5 s
+REG_DT = 1.0
+REG_PAD = 300.0
+REG_DMIN, REG_DMAX = 0.7, 8.0           # deg (~80-900 km): beyond near field, before 3-D/crust gets too strong
+REG_DMAX_WIDE = 12.0                    # fallback when fewer than 8 stations within REG_DMAX
+REG_GAP_WARN = 180.0                    # azimuthal gap above which a regional result is shaky
+REG_BAND_WIDE = (25.0, 60.0)            # widened (>8 deg) paths: longer periods see less of the 3-D crust
+REG_T_OFFSET = 10.0                     # s; best centroid shift was +9-10 s on every regional test
+REG_T_HALF = 6.0                        # (Syngine ak135f_5s time reference); search offset +- this
+REG_VR_MIN = 20.0                       # regional: below this refuse; REG_VR_MIN..VR_MIN = low confidence
+REG_VR_OK = 40.0                        # regional: at or above this (and decent coverage) not "low confidence"
+REG_CHANNELS = ("BH", "HH")             # broadband, preferred in this order
+REG_MAG_MAX = 5.5                       # auto mode: regional below this magnitude
 C = {"ok": "\033[32m", "warn": "\033[33m", "bad": "\033[31m", "h": "\033[1;36m", "dim": "\033[2m",
      "b": "\033[1m", "0": "\033[0m"}
 
@@ -248,8 +268,14 @@ def expand(raw, dist, band, bband, use_body):
     return out
 
 
-def band_for(mag):
+def band_for(mag, regional=False):
     """Period band (s) for long-period full-waveform inversion."""
+    if regional:
+        # regional practice (TDMT, CAP, USGS Mwr): 10-50 s; ak135 crust is too crude below ~15 s,
+        # and an M4 quake has little energy above ~40 s
+        if mag < 4.5:
+            return 10.0, 30.0       # M4-4.4: little energy beyond 30 s; use close stations (REG_PREF)
+        return (15.0, 40.0) if mag < 4.8 else (20.0, 50.0)
     # Tested on M6.8 Banda Sea (2026-11-21): 50-100 s gave VR 65 % and a mechanism 8-9 deg
     # from USGS/GFZ; 40-100 s only VR 52 % (more 3-D Earth effects at shorter periods).
     # Below M6: 35-80 s at 25-90 deg was the least bad of three setups tested on
@@ -259,34 +285,48 @@ def band_for(mag):
     return 50.0, 100.0          # Syngine DBs are accurate up to ~100 s periods
 
 
-def select_stations(ev, nmax, dmin, dmax):
+def reg_pref(mag):
+    """Preferred station distance (deg) in regional mode: small quakes need close stations."""
+    return 1.5 if mag < 4.5 else 3.0
+
+
+def select_stations(ev, nmax, dmin, dmax, regional=False):
     from obspy.clients.fdsn import RoutingClient
     t0 = ev["time"]
+    bands = REG_CHANNELS if regional else ("LH",)
     inv = RoutingClient("iris-federator").get_stations(
-        network=NETWORKS, channel="LH?", starttime=t0, endtime=t0 + 3600,
+        network="*" if regional else NETWORKS, channel=",".join(b + "?" for b in bands),
+        starttime=t0, endtime=t0 + 3600,
         latitude=ev["lat"], longitude=ev["lon"], minradius=dmin, maxradius=dmax, level="channel")
     cands = {}
     for net in inv:
         for sta in net:
             locs = {}
             for ch in sta:
-                locs.setdefault(ch.location_code, set()).add(ch.code[-1])
+                locs.setdefault((ch.code[:2], ch.location_code), set()).add(ch.code[-1])
             best = None
-            for loc in ("00", "10", "", "20", "60", "01"):
-                comps = locs.get(loc, set())
-                if "Z" in comps and ({"N", "E"} <= comps or {"1", "2"} <= comps):
-                    best = loc
+            for band in bands:
+                for loc in LOC_ORDER:
+                    comps = locs.get((band, loc), set())
+                    if "Z" in comps and ({"N", "E"} <= comps or {"1", "2"} <= comps):
+                        best = (band, loc)
+                        break
+                if best:
                     break
             if best is None:
                 continue
+            key = f"{net.code}.{sta.code}"
+            if key in cands:                    # same station listed twice (epochs)
+                continue
             d, az, baz = gps2dist_azimuth(ev["lat"], ev["lon"], sta.latitude, sta.longitude)
-            cands[f"{net.code}.{sta.code}"] = dict(net=net.code, sta=sta.code, loc=best,
-                                                   lat=sta.latitude, lon=sta.longitude,
-                                                   dist=d / 111194.9, az=az, baz=baz)
-    # spread in azimuth: one station per sector first (prefer ~60 deg distance), then fill
+            cands[key] = dict(net=net.code, sta=sta.code, loc=best[1], cha=best[0] + "?",
+                              lat=sta.latitude, lon=sta.longitude,
+                              dist=d / 111194.9, az=az, baz=baz)
+    # spread in azimuth: one station per sector first (prefer a mid distance), then fill
     nb = max(8, nmax)
     sectors = {}
-    for c in sorted(cands.values(), key=lambda c: abs(c["dist"] - 60)):
+    pref = reg_pref(ev["mag"]) if regional else 60.0
+    for c in sorted(cands.values(), key=lambda c: abs(c["dist"] - pref)):
         sectors.setdefault(int(c["az"] // (360 / nb)), []).append(c)
     chosen = []
     while len(chosen) < nmax and any(sectors.values()):
@@ -313,10 +353,10 @@ def filt(x, band):
 LOC_ORDER = ("00", "10", "", "20", "60", "01")
 
 
-def pick_location(st, net, sta):
+def pick_location(st, net, sta, cha="LH?"):
     """First location code whose returned data has Z plus two horizontals."""
     comps = {}
-    for tr in st.select(network=net, station=sta):
+    for tr in st.select(network=net, station=sta, channel=cha):
         comps.setdefault(tr.stats.location, set()).add(tr.stats.channel[-1])
     for loc in LOC_ORDER + tuple(sorted(comps)):
         c = comps.get(loc, set())
@@ -330,19 +370,21 @@ def download_data(ev, stations, t_end, band, n):
     t0 = ev["time"]
     rc = RoutingClient("iris-federator")
     # all location codes: some stations only have data at a second sensor (e.g. II.NIL 10)
-    bulk = [(s["net"], s["sta"], "*", "LH?", t0 - PAD - 300, t0 + t_end + 300) for s in stations]
+    bulk = [(s["net"], s["sta"], "*", s.get("cha", "LH?"), t0 - PAD - 300, t0 + t_end + 300)
+            for s in stations]
     st = rc.get_waveforms_bulk(bulk)
     inv = rc.get_stations_bulk(bulk, level="response")
     data = {}
     for s in stations:
-        loc, comps = pick_location(st, s["net"], s["sta"])
+        loc, comps = pick_location(st, s["net"], s["sta"], s.get("cha", "LH?"))
         if loc is None:
             got = ", ".join(f"{l or '--'}:{''.join(sorted(c))}" for l, c in comps.items())
             detail(f"    skip {s['net']}.{s['sta']}: "
                    + (f"incomplete components ({got})" if comps else "no data returned (metadata only)"))
             continue
         s["loc"] = loc
-        sub = st.select(network=s["net"], station=s["sta"], location=loc).copy()
+        sub = st.select(network=s["net"], station=s["sta"], location=loc,
+                        channel=s.get("cha", "LH?")).copy()
         try:
             gaps = sub.get_gaps()
             if sum(gp[6] for gp in gaps) > 30:            # more than 30 s missing in total
@@ -357,6 +399,9 @@ def download_data(ev, stations, t_end, band, n):
             sub.trim(t1, t2)                                # common span (needed for rotation)
             sub.detrend("linear")
             sub.taper(0.05)
+            if sub[0].stats.sampling_rate > 2.5:            # BH/HH: decimate to ~2 sps first
+                sub.filter("lowpass", freq=0.4, corners=6, zerophase=True)
+                sub.interpolate(2.0)
             sub.remove_response(inventory=inv, output="DISP", pre_filt=(0.002, 0.004, 0.1, 0.2))
             sub.rotate("->ZNE", inventory=inv)
             sub.rotate("NE->RT", back_azimuth=s["baz"])
@@ -367,12 +412,12 @@ def download_data(ev, stations, t_end, band, n):
     return data
 
 
-def thin_by_azimuth(stations, nmax):
+def thin_by_azimuth(stations, nmax, pref=60.0):
     """Keep at most nmax stations, spread evenly in azimuth."""
     if len(stations) <= nmax:
         return stations
     sectors = {}
-    for s in sorted(stations, key=lambda c: abs(c["dist"] - 60)):
+    for s in sorted(stations, key=lambda c: abs(c["dist"] - pref)):
         sectors.setdefault(int(s["az"] // (360 / nmax)), []).append(s)
     out = []
     while len(out) < nmax:
@@ -386,7 +431,7 @@ ELEMENTS = ("Mrr", "Mtt", "Mpp", "Mrt", "Mrp", "Mtp")
 UNIT = 1e20
 
 
-def greens(ev, stations, depth_km, t_end, band, n):
+def greens(ev, stations, depth_km, t_end, band, n, model=MODEL):
     """Synthetics for the six unit moment-tensor elements at one depth (Syngine bulk)."""
     from obspy.clients.syngine import Client as SynClient
     sc = SynClient()
@@ -399,7 +444,7 @@ def greens(ev, stations, depth_km, t_end, band, n):
         for attempt in range(3):
             try:
                 return sc.get_waveforms_bulk(
-                    model=MODEL, bulk=bulk, sourcelatitude=ev["lat"], sourcelongitude=ev["lon"],
+                    model=model, bulk=bulk, sourcelatitude=ev["lat"], sourcelongitude=ev["lon"],
                     sourcedepthinmeters=depth_km * 1000, sourcemomenttensor=mt,
                     origintime=ev["time"], starttime=ev["time"], endtime=ev["time"] + t_end + 200,
                     components="ZRT", units="displacement", dt=DT)
@@ -455,13 +500,25 @@ def expand_greens(graw, stations, band, bband, use_body, stf=None):
     return g
 
 
-def windows(ev, stations, n):
+def windows(ev, stations, n, regional=False):
     """(i0, i1, noise-start) per (station, component). Surface components: P-60 s to past
-    the Rayleigh wave. Body windows: P (Z) and S (T), long enough for pP/sP depth phases."""
+    the Rayleigh wave. Body windows: P (Z) and S (T), long enough for pP/sP depth phases.
+    Regional: one window from just before Pn to past the crustal surface waves (Pnl + Rayleigh/Love)."""
     from obspy.taup import TauPyModel
     model = TauPyModel("iasp91")
     w = {}
     dep = max(ev["depth"], 0)
+    if regional:
+        for s in stations:
+            key = f"{s['net']}.{s['sta']}"
+            arr = model.get_travel_times(dep, s["dist"], ["P", "p", "Pn"])
+            tp = min(a.time for a in arr) if arr else s["dist"] * 111.19 / 7.8
+            t1 = s["dist"] * 111.19 / 2.9 + 60              # past the crustal surface waves
+            sw = (int((tp - 10 + PAD) / DT), min(n - 1, int((t1 + PAD) / DT)),
+                  int((tp - 10 - 150 + PAD) / DT))
+            for c in "ZRT":
+                w[(key, c)] = sw
+        return w
     blen = 60 + 0.5 * dep                                   # covers sP-P delay for deep quakes
     for s in stations:
         key = f"{s['net']}.{s['sta']}"
@@ -510,7 +567,68 @@ def lsq(keys, data, g, win, sh, lags):
     a, *_ = np.linalg.lstsq(G, d, rcond=None)
     res = d - G @ a
     return {"vr": 100 * (1 - res @ res / (d @ d)), "m": [a[0], a[1], -a[0] - a[1], a[2], a[3], a[4]],
-            "a": a, "shift": sh, "d": d, "syn": G @ a, "idx": idx, "lags": dict(lags)}
+            "a": a, "shift": sh, "d": d, "syn": G @ a, "G": G, "idx": idx, "lags": dict(lags)}
+
+
+def dc_units(step=5.0):
+    """Unit double couples on a strike/dip/rake grid -> (sdr N x 3, a N x 5 = Mrr,Mtt,Mrt,Mrp,Mtp)
+    (Aki & Richards in r/theta/phi, GCMT convention)."""
+    st, dp, rk = np.meshgrid(np.radians(np.arange(0, 360, step)), np.radians(np.arange(step, 90.1, step)),
+                             np.radians(np.arange(-180, 180, step)), indexing="ij")
+    st, dp, rk = st.ravel(), dp.ravel(), rk.ravel()
+    sd, cd, s2d, c2d = np.sin(dp), np.cos(dp), np.sin(2 * dp), np.cos(2 * dp)
+    sr, cr, ss, cs, s2s, c2s = np.sin(rk), np.cos(rk), np.sin(st), np.cos(st), np.sin(2 * st), np.cos(2 * st)
+    mrr = s2d * sr
+    mtt = -(sd * cr * s2s + s2d * sr * ss ** 2)
+    mrt = -(cd * cr * cs + c2d * sr * ss)
+    mrp = cd * cr * ss - c2d * sr * cs
+    mtp = -(sd * cr * c2s + 0.5 * s2d * sr * s2s)
+    return np.degrees(np.column_stack([st, dp, rk])), np.column_stack([mrr, mtt, mrt, mrp, mtp])
+
+
+def to_dc(sol, units):
+    """Best pure double couple for the same weighted system (CAP-style grid search).
+    Small quakes: shallow-source surface waves barely resolve Mrt/Mrp, so the free
+    deviatoric tensor drifts into large spurious CLVD; the DC constraint stabilises it."""
+    G, d = sol["G"], sol["d"]
+    GtG, Gtd, dd = G.T @ G, G.T @ d, d @ d
+    num = units @ Gtd
+    den = np.einsum("ij,jk,ik->i", units, GtG, units)
+    vr = np.where(num > 0, num ** 2 / np.maximum(den, 1e-30) / dd, -np.inf)
+    i = int(np.argmax(vr))
+    a = units[i] * num[i] / den[i]
+    syn = G @ a
+    out = dict(sol)
+    out.update(vr=100 * (1 - (d - syn) @ (d - syn) / dd), a=a, syn=syn,
+               m=[a[0], a[1], -a[0] - a[1], a[2], a[3], a[4]], vr_free=sol["vr"], dc_vr=100 * vr)
+    return out
+
+
+def dc_spread(best, units, tol=None):
+    """Mechanism uncertainty: Kagan angles from the best DC to every grid mechanism whose VR is
+    within tol of the best (tol: 2 VR points or 10 % of VR, whichever is larger)."""
+    vr = best["dc_vr"]
+    top = float(np.max(vr))
+    tol = tol if tol is not None else max(2.0, 0.1 * top)
+    idx = np.flatnonzero(vr >= top - tol)
+    if len(idx) > 1500:
+        idx = np.random.default_rng(0).choice(idx, 1500, replace=False)
+    ang = [kagan_angle(best["m"], [u[0], u[1], -u[0] - u[1], u[2], u[3], u[4]]) for u in units[idx]]
+    return {"tol": tol, "n": int(np.sum(vr >= top - tol)), "kagan50": float(np.percentile(ang, 50)),
+            "kagan90": float(np.percentile(ang, 90))}
+
+
+def jackknife(best, data, g, win, units):
+    """Leave one station out, re-solve (same shift/lags, DC): Kagan angle to the full solution."""
+    stas = sorted({k for k, _ in best["keys"]})
+    out = []
+    for st in stas:
+        keys = [k for k in best["keys"] if k[0] != st]
+        if len(keys) < 4:
+            continue
+        sol = to_dc(lsq(keys, data, g, win, best["shift"], best["lags"]), units)
+        out.append((st, kagan_angle(sol["m"], best["m"])))
+    return out
 
 
 def best_lags(keys, data, g, win, sol, maxlag):
@@ -567,45 +685,74 @@ def trace_vr(sol):
     return out
 
 
-def invert(ev, args, outdir):
-    band = tuple(float(x) for x in args.band.split(",")) if args.band else band_for(ev["mag"])
+def invert(ev, args, outdir, regional=False):
+    global DT, PAD
+    DT, PAD = (REG_DT, REG_PAD) if regional else (2.0, 600.0)
+    model = REG_MODEL if regional else MODEL
+    band = (tuple(float(x) for x in args.band.split(",")) if args.band
+            else band_for(ev["mag"], regional))
     bband = body_band_for(ev["mag"])
-    use_body = not args.no_body
+    use_body = not args.no_body and not regional     # regional: Pnl is inside the full window
     stf = None if args.no_stf else stf_kernel(half_duration(ev["mag"]))
     detail(f"  source time function: " + ("none" if stf is None else
            f"triangle, half-duration {half_duration(ev['mag']):.1f} s"))
-    say("\n▶ Own inversion (about 1-3 min)")
-    detail(f"  waveform inversion: full waveforms {band[0]:.0f}-{band[1]:.0f} s"
+    say("\n▶ Own inversion" + (" — regional mode (about 2-5 min)" if regional else " (about 1-3 min)"))
+    detail(f"  waveform inversion: {'regional ' if regional else ''}full waveforms "
+           f"{band[0]:.0f}-{band[1]:.0f} s"
            + (f" + body waves (P on Z, SH on T) {bband[0]:.0f}-{bband[1]:.0f} s at "
-              f"{BODY_DMIN:.0f}-{BODY_DMAX:.0f}°" if use_body else "") + f", model {MODEL}")
+              f"{BODY_DMIN:.0f}-{BODY_DMAX:.0f}°" if use_body else "") + f", model {model}")
     t_start = time.time()
-    dmin = args.dmin if args.dmin is not None else 25.0
-    dmax = args.dmax if args.dmax is not None else 90.0
-    # per-station lag must stay well below the shortest period (no cycle skipping)
-    maxlag = args.maxlag if args.maxlag is not None else (30.0 if band[0] >= 50 else 25.0)
-    args.maxlag = maxlag
+    dmin = args.dmin if args.dmin is not None else (REG_DMIN if regional else 25.0)
+    dmax = args.dmax if args.dmax is not None else (REG_DMAX if regional else 90.0)
     bigger = preceding_quakes(ev)
     for b in bigger:
         detail(f"  warning: M{b[1]:.1f} {b[2]} {b[0]:.0f} min before; its surface waves may mask this quake")
     # ask for 2x the stations: some return no data (metadata only) or incomplete components
-    stations, ncand = select_stations(ev, int(args.stations * 2), dmin, dmax)
-    if len(stations) < 6:
-        raise RuntimeError(f"only {len(stations)} usable stations at {dmin:.0f}-{dmax:.0f}°")
+    stations, ncand = select_stations(ev, int(args.stations * 2), dmin, dmax, regional)
+    if regional and args.dmax is None and len(stations) < 8:
+        # sparse regions (e.g. Pakistan, Iran, Africa): reach further; 20-50 s crustal
+        # surface waves are still usable to ~12 deg with per-station lags
+        dmax = REG_DMAX_WIDE
+        stations, ncand = select_stations(ev, int(args.stations * 2), dmin, dmax, regional)
+        if not args.band:
+            band = REG_BAND_WIDE
+        detail(f"  fewer than 8 stations within {REG_DMAX:.0f}°: widening to {dmax:.0f}°, "
+               f"band {band[0]:.0f}-{band[1]:.0f} s")
+    # per-station lag must stay well below the shortest period (no cycle skipping)
+    if args.maxlag is not None:
+        maxlag = args.maxlag
+    elif regional:
+        maxlag = 0.5 * band[0]          # 1-D crust vs real crust: a few s at 15-60 s periods
+    else:
+        maxlag = 30.0 if band[0] >= 50 else 25.0
+    if len(stations) < (4 if regional else 6):
+        raise RuntimeError(f"only {len(stations)} usable stations at {dmin:.1f}-{dmax:.0f}°"
+                           + (" (no open regional broadband data near this quake)" if regional else ""))
     gap = azimuthal_gap([s["az"] for s in stations])
-    detail(f"  stations: {len(stations)} requested of {ncand} available at {dmin:.0f}-{dmax:.0f}° "
+    detail(f"  stations: {len(stations)} requested of {ncand} available at {dmin:.1f}-{dmax:.0f}° "
            f"(azimuthal gap {gap:.0f}°)")
-    t_end = max(s["dist"] for s in stations) * 111.19 / 3.4 + 400
+    if regional:
+        t_end = max(s["dist"] for s in stations) * 111.19 / 2.5 + 150
+    else:
+        t_end = max(s["dist"] for s in stations) * 111.19 / 3.4 + 400
     n = int((t_end + PAD) / DT)
     progress(f"downloading waveforms from {len(stations)} stations…")
     data = download_data(ev, stations, t_end, band, n)
     usable = [s for s in stations if f"{s['net']}.{s['sta']}" in data]
-    stations = thin_by_azimuth(usable, int(args.stations * 1.25))
+    stations = thin_by_azimuth(usable, int(args.stations * 1.25), reg_pref(ev["mag"]) if regional else 60.0)
     data = {k: v for k, v in data.items() if any(f"{s['net']}.{s['sta']}" == k for s in stations)}
     gap = azimuthal_gap([s["az"] for s in stations])
     detail(f"  usable 3-component records: {len(usable)}, kept {len(stations)} (azimuthal gap {gap:.0f}°)")
-    if len(stations) < 6:
+    if regional and gap > REG_GAP_WARN:
+        say(f"  warning: azimuthal gap {gap:.0f}° (stations on one side only); "
+            "the mechanism may be poorly constrained", "warn")
+    if regional:
+        for s in sorted(stations, key=lambda s: s["dist"]):
+            detail(f"    {s['net']}.{s['sta']}.{s['loc'] or '--'}.{s['cha']}  {s['dist']:.2f}° "
+                   f"({s['dist'] * 111.19:.0f} km)  az {s['az']:.0f}°")
+    if len(stations) < (4 if regional else 6):
         raise RuntimeError("too few usable records")
-    win = windows(ev, stations, n)
+    win = windows(ev, stations, n, regional)
     data = {s_key: expand(raw, next(s["dist"] for s in stations if f"{s['net']}.{s['sta']}" == s_key),
                           band, bband, use_body) for s_key, raw in data.items()}
 
@@ -633,18 +780,32 @@ def invert(ev, args, outdir):
     nsta_clear = len({k for k, _ in keys})
     nbody = sum(1 for _, c in keys if c in BODY_COMPS)
     detail(f"  traces with clear signal (SNR > 3): {len(keys)} ({nbody} body-wave) from {nsta_clear} stations")
-    if len(keys) < 8 or nsta_clear < 4:
+    if len(keys) < (6 if regional else 8) or nsta_clear < (3 if regional else 4):
         why = (f" A bigger quake (M{bigger[0][1]:.1f} {bigger[0][2]}) happened {bigger[0][0]:.0f} min "
                "before; its surface waves are probably masking this one." if bigger else
                " The quake may be too small for this method.")
         raise RuntimeError(f"too few records with a clear signal ({len(keys)} traces).{why}")
     if args.depths:
         depths = [float(x) for x in args.depths.split(",")]
+    elif regional:
+        # small quakes are mostly shallow crustal; catalogue depth is often a fixed 10 km
+        d0 = ev["depth"]
+        step = 4 if d0 < 40 else 10
+        depths = sorted({max(2.0, round(d0 + k * step)) for k in (-2, -1, 0, 1, 2)})
     else:
         d0 = ev["depth"]
         step = 10 if d0 < 70 else 20
         depths = sorted({max(5.0, d0 + k * step) for k in (-2, -1, 0, 1, 2)})
-    shifts = np.arange(-10, 31, 2.0)
+    dmin_depth = 2.0 if regional else 5.0
+    # regional: the best centroid shift came out at +9-10 s at all distances (Syngine ak135f_5s
+    # time reference). A wide grid let Greece M4.2 jump a cycle to +19 s (85 deg wrong), so
+    # search only around that offset (small quakes: centroid ~ origin time)
+    shifts = (np.arange(REG_T_OFFSET - REG_T_HALF, REG_T_OFFSET + REG_T_HALF + DT / 2, DT) if regional
+              else np.arange(-10, 31, 2.0))
+    use_dc = regional and not args.full_mt
+    units = dc_units()[1] if use_dc else None
+    if use_dc:
+        detail("  double-couple constrained (strike/dip/rake grid, 5° steps); --full-mt for a free tensor")
     results = []
     gcache = {}
     step = (depths[1] - depths[0]) if len(depths) > 1 else 10.0
@@ -654,8 +815,8 @@ def invert(ev, args, outdir):
         dep = queue.pop(0)
         progress(f"Green's functions + inversion at {dep:.0f} km depth "
                  f"({len(results) + 1}/{len(results) + len(queue) + 1})…")
-        gcache[dep] = expand_greens(greens(ev, stations, dep, t_end, band, n), stations, band, bband,
-                                    use_body, stf)
+        gcache[dep] = expand_greens(greens(ev, stations, dep, t_end, band, n, model), stations, band,
+                                    bband, use_body, stf)
         use = [k for k in keys if k[0] in gcache[dep] and k[1] in gcache[dep][k[0]]
                and all(x is not None for x in gcache[dep][k[0]][k[1]])]
         # station lags are fitted once at the catalogue depth and then kept fixed, so
@@ -664,32 +825,37 @@ def invert(ev, args, outdir):
         if ref_lags is not None:
             sol = solve_fixed(use, data, gcache[dep], win, shifts, ref_lags)
         else:
-            sol = solve(use, data, gcache[dep], win, shifts, maxlag=args.maxlag)
+            sol = solve(use, data, gcache[dep], win, shifts, maxlag=maxlag)
             ref_lags = ref_lags if ref_lags is not None else sol["lags"]
         # quality control: drop traces the model cannot fit at all, solve again
         tv = trace_vr(sol)
         good = [k for k in use if tv[k] > -20]
-        if len(good) >= 8 and len(good) < len(use):
+        if len(good) >= (6 if regional else 8) and len(good) < len(use):
             sol = (solve_fixed(good, data, gcache[dep], win, shifts, ref_lags) if ref_lags is not None
-                   else solve(good, data, gcache[dep], win, shifts, maxlag=args.maxlag))
+                   else solve(good, data, gcache[dep], win, shifts, maxlag=maxlag))
             use = good
+        if use_dc:
+            sol = to_dc(sol, units)
         sol.update(depth=dep, keys=use)
         results.append(sol)
         lg = np.abs(list(sol["lags"].values())) if sol["lags"] else np.zeros(1)
-        detail(f"    depth {dep:5.0f} km   VR {sol['vr']:5.1f} %   shift {sol['shift']:+.0f} s   "
+        detail(f"    depth {dep:5.0f} km   VR {sol['vr']:5.1f} %"
+               + (f" (free MT {sol['vr_free']:4.1f} %)" if use_dc else "") + f"   shift {sol['shift']:+.0f} s   "
                f"station lags median {np.median(lg):.0f} s   traces {len(use)}")
         if not queue and len(results) < 9 and not args.depths:   # best at an edge -> extend
             done = sorted(r["depth"] for r in results)
             top = max(results, key=lambda r: r["vr"])["depth"]
             if top == done[-1] and top + step <= 700:
                 queue.append(top + step)
-            elif top == done[0] and top - step >= 5:
+            elif top == done[0] and top - step >= dmin_depth:
                 queue.append(top - step)
+            elif top == done[0] and top > dmin_depth and dmin_depth not in done:
+                queue.append(dmin_depth)
     best = max(results, key=lambda r: r["vr"])
     # scalar moment from the median amplitude ratio of well-fitting traces: least squares
     # over all traces is pulled low by misfit (issue #2: Banda dMw -0.07 -> -0.02,
     # Peru -0.16 -> -0.11 vs USGS Mww)
-    if True:
+    if not regional:   # regional tests (CA, Greece): scaling pushed Mw 0.04-0.07 too high
         tv = trace_vr(best)
         pos, ratios = 0, []
         for key, c, _, nn in best["idx"]:
@@ -697,19 +863,53 @@ def invert(ev, args, outdir):
             if tv[(key, c)] > 50 and sy @ sy > 0:
                 ratios.append((d @ sy) / (sy @ sy))   # per-trace amplitude ratio data/synthetic
             pos += nn
-        if len(ratios) >= 6:
+        if len(ratios) >= (4 if regional else 6):
             f = float(np.median(ratios))
             detail(f"  amplitude scaling from {len(ratios)} well-fitting traces: x{f:.3f}")
             best["m"] = [x * f for x in best["m"]]
     mw_best = mt_props(best["m"])["Mw"]
-    if best["vr"] < VR_MIN or abs(mw_best - ev["mag"]) > 1.0:
+    nsta = len({k for k, _ in best["keys"]})
+    if regional:
+        # few stations / one-sided coverage: report with uncertainty instead of refusing;
+        # refuse only when the data are barely explained at all
+        if best["vr"] < REG_VR_MIN or abs(mw_best - ev["mag"]) > 1.0:
+            raise RuntimeError(f"no solution: best VR {best['vr']:.0f} % (Mw {mw_best:.1f} vs catalogue "
+                               f"M{ev['mag']:.1f}); the 1-D model does not explain the records, so "
+                               "any mechanism fits about equally badly")
+    elif best["vr"] < VR_MIN or abs(mw_best - ev["mag"]) > 1.0:
         raise RuntimeError(f"no reliable solution (best VR {best['vr']:.0f} %, Mw {mw_best:.1f} vs "
                            f"catalogue M{ev['mag']:.1f}); data do not constrain the mechanism")
     near = [r["depth"] for r in results if r["vr"] >= best["vr"] - 2.0]   # depths fitting ~as well
+    unc = {}
+    if use_dc:
+        progress("uncertainty: mechanism spread + station jackknife…")
+        unc["spread"] = dc_spread(best, units)
+        jk = jackknife(best, data, gcache[best["depth"]], win, units)
+        if jk:
+            ang = [a for _, a in jk]
+            worst = max(jk, key=lambda x: x[1])
+            unc["jackknife"] = {"median": float(np.median(ang)), "max": float(worst[1]), "station": worst[0],
+                                "n": len(jk)}
+        for k, a in sorted(jk, key=lambda x: -x[1])[:5]:
+            detail(f"    without {k:12s}: mechanism changes by {a:3.0f}°")
+    reasons = []
+    if regional:
+        if best["vr"] < REG_VR_OK:
+            reasons.append(f"VR {best['vr']:.0f} %")
+        if nsta < 6:
+            reasons.append(f"only {nsta} stations")
+        if gap > REG_GAP_WARN:
+            reasons.append(f"azimuthal gap {gap:.0f}°")
+        if unc.get("spread", {}).get("kagan90", 0) > 40:
+            reasons.append(f"many mechanisms fit (±{unc['spread']['kagan90']:.0f}°)")
+        if unc.get("jackknife", {}).get("max", 0) > 40:
+            reasons.append(f"depends on {unc['jackknife']['station']}")
     props = mt_props(best["m"])
     props.update(agency="SEISBOX inversion", depth=best["depth"], vr=best["vr"], body=use_body,
                  shift=best["shift"], depth_range=(min(near), max(near)), ntraces=len(best["keys"]), nsta=len({k for k, _ in best["keys"]}),
-                 gap=gap, band=band, model=MODEL, runtime=time.time() - t_start,
+                 gap=gap, band=band, model=model, mode="regional" if regional else "teleseismic",
+                 runtime=time.time() - t_start, uncertainty=unc,
+                 confidence="low" if reasons else "normal", low_reasons=reasons,
                  depth_curve=[(r["depth"], r["vr"]) for r in results])
     progress("")
     plot_fits(ev, best, stations, win, outdir, band, bband if use_body else None)
@@ -891,9 +1091,14 @@ def main():
     p.add_argument("--mag", type=float, default=6.0)
     p.add_argument("--region", default="")
     p.add_argument("--invert", action="store_true", help="also run the waveform inversion")
+    p.add_argument("--mode", choices=("auto", "regional", "teleseismic"), default="auto",
+                   help=f"inversion setup: regional (M4-5.5, stations {REG_DMIN}-{REG_DMAX:.0f} deg), "
+                   f"teleseismic (M5.4+, 25-90 deg); auto = regional below M{REG_MAG_MAX}")
     p.add_argument("--stations", type=int, default=24, help="max stations (default 24)")
-    p.add_argument("--dmin", type=float, default=None, help="min distance, deg (default 25)")
-    p.add_argument("--dmax", type=float, default=None, help="max distance, deg (default 90)")
+    p.add_argument("--dmin", type=float, default=None,
+                   help=f"min distance, deg (default 25; regional {REG_DMIN})")
+    p.add_argument("--dmax", type=float, default=None,
+                   help=f"max distance, deg (default 90; regional {REG_DMAX:.0f})")
     p.add_argument("--depths", default="", help="comma list of trial depths, km")
     p.add_argument("--band", default="", help="period band 'Tmin,Tmax' in s (default by magnitude)")
     p.add_argument("--no-stf", action="store_true",
@@ -901,6 +1106,8 @@ def main():
     p.add_argument("--body-only", action="store_true", help="P/SH body waves only (default below M6)")
     p.add_argument("--with-surface", action="store_true",
                    help="below M6: also fit the long-period waveforms (normally body waves only)")
+    p.add_argument("--full-mt", action="store_true",
+                   help="regional mode: free deviatoric tensor instead of a pure double couple")
     p.add_argument("--no-body", action="store_true",
                    help="full long-period waveforms only (no P/SH body-wave windows)")
     p.add_argument("--maxlag", type=float, default=None,
@@ -939,15 +1146,29 @@ def main():
 
     mine = None
     if a.invert:
-        if a.mag < 5.3:
-            say(f"  M{a.mag:.1f} is too small for teleseismic long-period inversion (needs ~M5.5+).", "warn")
+        mode = a.mode if a.mode != "auto" else ("regional" if a.mag < REG_MAG_MAX else "teleseismic")
+        if a.mag < 3.8:
+            say(f"  M{a.mag:.1f} is too small even for regional inversion (needs ~M4+).", "warn")
+        elif mode == "teleseismic" and a.mag < 5.3:
+            say(f"  M{a.mag:.1f} is too small for teleseismic inversion (needs ~M5.5+); "
+                "use --mode regional.", "warn")
         else:
             try:
-                mine = invert(ev, a, outdir)
+                try:
+                    mine = invert(ev, a, outdir, regional=(mode == "regional"))
+                except RuntimeError as e:
+                    # no regional data (oceans, sparse networks): an M5.3+ can still go teleseismic
+                    if mode != "regional" or a.mode == "regional" or a.mag < 5.3:
+                        raise
+                    say(f"  regional mode failed ({e}); trying teleseismic", "warn")
+                    a.maxlag = None
+                    mine = invert(ev, a, outdir, regional=False)
                 show(fmt_sol(mine))
                 lo, hi = mine["depth_range"]
                 if hi > lo:
                     print(f"  depth range {lo:.0f}-{hi:.0f} km (fits nearly as well)")
+                detail(f"  mode {mine['mode']}, model {mine['model']}, band "
+                       f"{mine['band'][0]:.0f}-{mine['band'][1]:.0f} s")
                 detail(f"  centroid time shift {mine['shift']:+.0f} s   stations {mine['nsta']}  traces "
                        f"{mine['ntraces']}   azimuthal gap {mine['gap']:.0f}°   ({mine['runtime']:.0f} s)")
                 curve = "  ".join(f"{d:.0f}km:{v:.0f}%" for d, v in mine["depth_curve"])
@@ -955,6 +1176,19 @@ def main():
                 q = mine["vr"]
                 qual = ("good", "ok") if q >= 60 else (("fair", "warn") if q >= 40 else ("poor", "bad"))
                 say(f"  fit quality: {qual[0]} (VR {q:.0f} %, {mine['nsta']} stations)", qual[1])
+                u = mine.get("uncertainty", {})
+                if "spread" in u:
+                    sp = u["spread"]
+                    print(f"  mechanism uncertainty: ±{sp['kagan90']:.0f}° (90 % of mechanisms within "
+                          f"{sp['tol']:.0f} VR points of the best; median {sp['kagan50']:.0f}°)")
+                    detail(f"  {sp['n']} grid mechanisms fit within {sp['tol']:.1f} VR points")
+                if "jackknife" in u:
+                    jk = u["jackknife"]
+                    print(f"  leave-one-station-out: median {jk['median']:.0f}°, max {jk['max']:.0f}° "
+                          f"(without {jk['station']})")
+                if mine.get("confidence") == "low":
+                    say("  LOW CONFIDENCE: " + "; ".join(mine["low_reasons"])
+                        + ". Treat as an estimate, not a definitive mechanism.", "warn")
                 refs = [s for s in sols if "m" in s]
                 for s in refs[:3]:
                     detail(f"  vs {s['agency']:12}: Kagan angle {kagan_angle(mine['m'], s['m']):3.0f}°   "
@@ -975,7 +1209,7 @@ def main():
         files.append("inversion_waveform_fits.png")
     with open(os.path.join(outdir, f"{layer}.json"), "w") as f:
         json.dump({"event": {**ev, "time": str(ev["time"]), "region": a.region, "usgs_id": usgs_id},
-                   "solutions": [{k: v for k, v in s.items() if k not in ("d", "syn", "idx")}
+                   "solutions": [{k: v for k, v in s.items() if k not in ("d", "syn", "idx", "G", "a")}
                                  for s in allsols]}, f, indent=1, default=float)
     files += [f"{layer}_summary.txt", f"{layer}.json"]
     say(f"\nSaved: {outdir}/", "dim")

@@ -411,7 +411,7 @@ seisview /sdcard/termux/projects/mt/2026-11-21_0942UTC_M6.8_Banda-Sea/*.png   # 
 the event (W-phase *Mww*, centroid *Mwc*, body-wave *Mwb*, regional *Mwr*, first-motion), plus the
 GFZ GEOFON moment tensor. They usually appear 20–60 min after an M5+ quake.
 
-**Layer 2 (`i`, about 1–3 min): own inversion from raw waveforms.**
+**Layer 2 (`i`, about 1–5 min): own inversion from raw waveforms.** M5.5 and up: teleseismic mode (below); M4–5.5: regional mode (further down).
 
 1. Requests about 48 global broadband stations (IU, II, G, GE, IC, CU, GT, MN) 25–90° away, spread
    evenly in azimuth, and downloads 3-component long-period (LH, 1 sample/s) data and instrument
@@ -441,7 +441,34 @@ GFZ GEOFON moment tensor. They usually appear 20–60 min after an M5+ quake.
    or when too few records have clear signal. It also warns if a bigger quake in the 3 h before may be
    masking the event.
 
-Validation on recent quakes:
+**Regional mode (M4–5.5, automatic below M5.5; `--mode regional|teleseismic` to force).**
+Small quakes are too weak at teleseismic distances, so the inversion switches to nearby stations:
+
+1. Broadband BH/HH stations of **any network** 0.7–8° away (about 80–900 km), preferring ~1.5° for
+   M<4.5 and ~3° above. If fewer than 8 are found it widens to 12° and uses 25–60 s.
+2. Full 3-component waveforms (Pnl + Rayleigh + Love) at **10–30 s** (M<4.5), 15–40 s (M4.5–4.8)
+   or 20–50 s (M4.8+), Green's functions from Syngine **ak135f_5s** (35 km continental crust),
+   CAP-style per-station lags (half the shortest period), depth grid in 4 km steps from 2 km.
+3. **Pure double couple** by grid search over strike/dip/rake (5° steps); the free tensor drifted into
+   large false CLVD on small quakes. `--full-mt` gives the free deviatoric tensor.
+4. **Uncertainty**: the spread (Kagan angle, 90 %) of all mechanisms that fit nearly as well, and a
+   leave-one-station-out test that names the station the result depends on most.
+5. Results with VR 20–40 %, fewer than 6 stations or an azimuthal gap over 180° are shown with a
+   **LOW CONFIDENCE** label and the reasons. Below VR 20 % it refuses: the 1-D model then does not
+   explain the records, and any mechanism fits about equally badly.
+
+| Quake | Stations | SEISBOX result | Published | Difference |
+|---|---|---|---|---|
+| M5.0 Pinnacles CA, 20 Nov 2026 | 27, gap 175° | Mw 5.04, strike-slip, 6 km, VR 52 %, ±21° | USGS Mwr 4.97, 134°/82°/173° | Kagan **3° (Mwr)**, 8° (Mw), 19° (Mww); ΔMw +0.07 |
+| M4.7 Aladağ Turkey, 9 Nov 2026 | 24, gap 53° | Mw 4.68, strike-slip, 18 km, VR 31 %, low confidence | USGS Mwr 4.61 · GFZ 4.55 | Kagan **10° (GFZ)**, 15° (USGS); ΔMw +0.06 / +0.12 |
+| M4.2 Sykia Greece, 31 Oct 2026 | 16, gap 80° | Mw 4.26, strike-slip, 10 km, VR 37 %, low confidence | USGS Mwr 4.19 · GFZ 4.22 | Kagan 25° (GFZ), 30° (USGS); ΔMw +0.04 / +0.07 |
+| M4.0 Lake Pillsbury CA, 28 Oct 2026 | 9 with clear signal | **refused** (VR 18 %) | USGS Mwr 4.06 | at VR 18 % the best fit was 64–70° wrong, which is why the cut-off is 20 % |
+| M4.3 Surab Pakistan, 24 Nov 2026 | nearest 750 km, gap 206° | **refused** (VR 1–2 % in all bands) | none | no open data close enough |
+
+The uncertainty numbers are lower limits: they show how well the data pin the mechanism down for
+the 1-D model, not how wrong the model is (Greece: ±14° reported, 25–30° from USGS/GFZ).
+
+Validation on recent quakes (teleseismic mode):
 
 | Quake | Stations | SEISBOX result | Published | Difference |
 |---|---|---|---|---|
@@ -456,8 +483,10 @@ Before body waves and the source time function, the same Banda Sea quake gave 13
 misfit curve, and all M5.4–5.9 quakes were refused (or, worse, a 61–81° wrong "poor" result).
 
 **Limits.**
-- Works from about **M5.4** (body waves only below M6). Smaller quakes need local stations and
-  regional models. It fails when a bigger quake shortly before still dominates the records; the
+- Teleseismic mode works from about **M5.4** (body waves only below M6). Regional mode reaches
+  about **M4–4.5** where open broadband stations lie within a few hundred km (Europe, Turkey, the
+  US, Japan, ...). Around M4.0 it is at its limit, and in sparsely covered regions (e.g. Pakistan,
+  Iran, much of Africa) small quakes usually cannot be solved. It fails when a bigger quake shortly before still dominates the records; the
   tool then says so.
 - **Depth** comes mainly from the body-wave depth phases. Without body waves (`--no-body`) the
   long-period fit hardly resolves depth: Banda Sea gave 136 km with a flat misfit curve, and
